@@ -1,0 +1,1205 @@
+---
+title: "Georeference_Village_School"
+author: "Bihter Erbas"
+date: "11/04/2023"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+rm(list=ls())
+library(sf)
+library(rgeos)
+library(rgdal)
+library(dplyr)
+library(tidyverse)
+library(stringr)
+library(readxl)
+#library(tmap)
+library(writexl)
+library(preregr) # to avoid bind_rows problem
+library(glue)
+library(openxlsx)
+library(rstudioapi)
+library(here) # Package to access parent directory while reading files (to rerun the code smoothly anywhere)
+
+# Set the path current open file
+current_path = rstudioapi::getActiveDocumentContext()$path 
+setwd(dirname(current_path ))
+
+
+```
+
+### Import CENI dataset and filter
+```{r message=FALSE, warning=FALSE}
+ceni_filtered <- read_excel(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "raw")),'cenischools_clean_v3.xlsx', sep="/")) %>%
+  dplyr::relocate(c(province, circonscription, clcr, ceni_sect_chef_comm, ceni_group_quart, ceni_address_vill_avenue, ceni_nom_sv)) %>%
+  dplyr::filter(province != "KINSHASA") %>% # Remove KINSHASA
+  dplyr::filter(!str_detect(circonscription,"\\sVILLE")) %>% # Remove all VILLES
+  dplyr::filter(!is.na(ceni_group_quart)) %>% # Remove other villes
+  dplyr::filter(!is.na(ceni_address_vill_avenue)) %>% # Remove other villes
+  dplyr::mutate(n = 1) %>% ## Keep only single observation by group. Group is the smaller admin unit.
+  group_by(province, circonscription, clcr, ceni_sect_chef_comm, ceni_group_quart, ceni_address_vill_avenue) %>% 
+  dplyr::mutate(tot = sum(n)) %>% 
+  ungroup() %>% 
+  dplyr::filter(tot == 1) %>% ## Keep only single observation by group. Group is the smaller admin unit.
+  dplyr::filter(str_count(ceni_address_vill_avenue," ") == 0) %>% # Keep only single words (i.e., no space between words)
+  dplyr::filter(str_detect(ceni_nom_sv, ceni_address_vill_avenue)) %>% # Filter to observations where village name is in school name
+  dplyr::filter(str_count(ceni_nom_sv," ") != 0) %>% # Keep observations with at least two words
+  dplyr::filter(!str_detect(ceni_nom_sv,"CABANE")) %>% # Remove Cabanes
+  dplyr::mutate_at(.vars=vars(province), list(~ gsub("-", " ", .))) %>% # Harmonize province name
+  dplyr::mutate(town_province = paste0(ceni_sect_chef_comm,province)) %>%
+  dplyr::mutate(town_province = gsub("[[:blank:]]", "", town_province))
+```
+
+### Import SIGE dataset
+
+```{r message=FALSE, warning=FALSE}
+sigeschools.all <- read_excel(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "raw")),'sigeschools.xlsx', sep="/")) %>% 
+  dplyr::mutate_at(.vars=vars(ProvincePoliAdmin), list(~ gsub("-", " ", .))) # Harmonize province name
+```
+
+
+
+## 1. Matching on circonscription and territoire and other four admin variables.
+
+In the code chunk below, I do a simple matching on school names. For the voting stations data (CENI), I concatenate _ceni_nom_sv, province, circonscription_ as the matching variable. As for the school data (SIGE), I take _NomEcole, ProvincePoliAdmin, Territoire_ . I had run this code below without harmonizing $\textit{Territoire}$ and _circonscription_ names before. I was able to find $63\%$ of the school names within both datasets. After I ran the same code with the harmonized _Territoire_ names, I was able to match school $67.4\%$ school names.
+
+Similar process was done for the other four admin variables for which I don't include the code chunk here as it is a long loop. The admin variables for as follows for CENI: \\
+ * adm_var1 : province, circonscription, ceni_address_vill_avenue
+ * adm_var2 : province, circonscription, ceni_group_quart
+ * adm_var3 : province, circonscription, ceni_sect_chef_comm
+ * adm_var4 : province, clcr, circonscription
+
+And for SIGE: adm_var : ProvincePoliAdmin,Territoire, Sproved
+
+```{r echo=TRUE}
+#remove(list=b)
+ceni_small_villes_match <- ceni_filtered %>%
+  dplyr::select(c('ceni_site_vote_ID','province', 'circonscription', 'ceni_sect_chef_comm', 'ceni_group_quart', 'ceni_address_vill_avenue', 'ceni_nom_sv', "town_province")) %>%
+  dplyr::mutate(match_var = paste(ceni_nom_sv,province,circonscription)) %>%
+  dplyr::mutate(match_var = str_replace_all(match_var, fixed(" "), ""))
+
+ceni_small_villes_match  <- ceni_small_villes_match %>% dplyr::mutate_at(.vars=vars(province), list(~ gsub("  ", " ", .)))
+  
+small_villes <-  unique(ceni_small_villes_match$circonscription)
+
+
+for(s in small_villes) {
+
+  temp_ceni_small_villes_match <- ceni_small_villes_match %>%   dplyr::filter(ceni_small_villes_match$circonscription == s)
+  
+
+    # Generate Matching Variable SIGE
+  temp_sige_match <- sigeschools.all %>%
+    dplyr::filter(Territoire == s) %>%
+    dplyr::mutate(match_var = paste(NomEcole,ProvincePoliAdmin,Territoire)) %>%
+    dplyr::mutate(match_var = str_replace_all(match_var, fixed(" "), "")) %>%
+    dplyr::mutate(info = NA)
+  
+  temp_sige_match <- temp_sige_match %>% 
+    dplyr::mutate(match_var_trimmed = match_var) %>%
+    dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("COMPLEXESCOLAIRE|ECOLEMATERNELLE|COLLEGE|ECOLEPRIMAIRE|LYCEE|INSTITUT|INSTITUTSCIENTIFIQUE|INSTITUTTECHNIQUEAGRICOLE|INSTITUTTECHNIQUEPROFESSIONNEL|INSTITUTTECHNOLOGIQUE|GROUPESCOLAIRE|ACADEMIE", "", .))) %>%  # remove school types
+    group_by(match_var_trimmed, ProvincePoliAdmin) %>% add_count(name = "occurence") 
+  
+# Take all the 1 occurences and add other school types in here
+  temp_sige_match.expanded <- temp_sige_match[rep(row.names(temp_sige_match), ifelse(temp_sige_match$occurence==1, 8, 1)), ] %>%
+    group_by(match_var_trimmed) %>% dplyr::mutate(ind = row_number()) %>% filter(occurence == 1)
+
+  temp_sige_match.expanded$match_var_trimmed <- paste(temp_sige_match.expanded$ind, temp_sige_match.expanded$match_var_trimmed)
+
+# If there is just one school, add all other school types  
+ temp_sige_match.expanded<- temp_sige_match.expanded %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(1)\\s+(*.)", "ECOLEPRIMAIRE\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(2)\\s+(*.)", " ECOLEMATERNELLE\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(3)\\s+(*.)", " COLLEGE\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(4)\\s+(*.)", " LYCEE\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(5)\\s+(*.)", " INSTITUT\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(6)\\s+(*.)", " GROUPESCOLAIRE\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(7)\\s+(*.)", " COMPLEXESCOLAIRE\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(8)\\s+(*.)", " ACADEMIE\\2", .))) %>%
+        dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("\\s\\s", " ", .))) %>% # DOUBLE SPACE
+         dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("^\\s|\\s$", "", .))) %>%   # SINGLE SPACE BEGINNING OR END
+ dplyr::mutate(merge_exp=1)
+
+
+ temp_sige_match.final <- dplyr::bind_rows(temp_sige_match,  temp_sige_match.expanded)  %>%
+                       dplyr::mutate_at(c('merge_exp'), ~replace_na(.,0))
+
+ # Make sure you have no duplicates in the school names
+ temp_sige_match.final <- temp_sige_match.final %>% dplyr::mutate(match_var = ifelse(occurence == 1, match_var_trimmed, match_var))
+
+ temp_sige_match.final$match_var <- as.character(temp_sige_match.final$match_var)
+
+# Take all schools without any numbers and add digits up to
+ temp_sige_match.final.exp <- temp_sige_match.final %>% dplyr::filter(!str_detect(match_var,"[0-9]")) %>% dplyr::mutate(nums = 1)
+ temp_sige_match.final.exp <- temp_sige_match.final.exp[rep(row.names(temp_sige_match.final.exp), ifelse(temp_sige_match.final.exp$nums==1, 8, 1)), ] %>% group_by(match_var) %>% dplyr::mutate(ind.exp = row_number())
+
+temp_sige_match.final.exp$match_var <- paste(temp_sige_match.final.exp$match_var,temp_sige_match.final.exp$ind.exp)
+
+temp_sige_match.final.exp <- temp_sige_match.final.exp %>%  dplyr::mutate_at(.vars=vars(match_var), list(~ gsub("\\s\\s", " ", .))) %>% # DOUBLE SPACE
+         dplyr::mutate_at(.vars=vars(match_var), list(~ gsub("^\\s|\\s$", "", .)))  %>%  # SINGLE SPACE BEGINNING OR END
+         dplyr::mutate(match_var = gsub("[[:blank:]]", "", match_var))
+
+  temp_sige_match.final.digits <- dplyr::bind_rows(temp_sige_match.final,  temp_sige_match.final.exp)
+
+# Match the ceni data with sige schools by match_var which is the school name + relative admin unit
+ matching <- left_join(temp_ceni_small_villes_match,temp_sige_match.final.digits, by = "match_var") 
+ 
+ assign(s, matching)
+}
+
+
+a = ls()
+index = which(str_detect(a, "[[:upper:]]"))
+b = a[index]
+matching_binded_c_new <- do.call(bind_rows, lapply(b, get, env=environment()))
+
+matching_binded_c_new_filtered <- matching_binded_c_new %>%
+  dplyr::filter(!is.na(NomEcole))
+x2 <- nrow(matching_binded_c_new_filtered)
+y2 <- nrow(matching_binded_c_new)
+
+x2/y2*100
+
+## 63.04417% performance within loop
+## 67.37288% performance within loop
+
+# Export data
+write_xlsx(matching_binded_c_new,paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "raw")),'matching_village_school_adm5.xlsx', sep="/"))
+```
+
+
+## 2. Import matching data with circonscription and territoire
+
+Because the code above takes a while, I saved it as an Excel file so that I import it without running the code again. I create two _town_province_ variables. The variable _town_province1_ takes the _province_ and _circonscription_ from CENI and _town_province2_ takes the _ProvincePoliAdmin_ and _Territoire_ from SIGE. 
+
+```{r}
+matching_crc <- read_excel(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "raw")),'matching_village_school_adm5.xlsx', sep="/"))  %>% dplyr::mutate(town_province1 = paste0(province,circonscription),town_province2 = paste0(ProvincePoliAdmin,Territoire) ) #%>% dplyr::distinct(ceni_nom_sv, NomEcole, town_province1, town_province2, .keep_all = TRUE)
+
+matching <- matching_crc[,1:19] %>% dplyr::filter(!is.na(NomEcole)) %>% dplyr::mutate(town_province1 = paste0(province,circonscription),town_province2 = paste0(ProvincePoliAdmin,Territoire))
+```
+
+The  matching_crc data has `r nrow(matching_crc)` observations. When I remove the unmatched school names and remove duplicates by _ceni_nom_sv, NomEcole, town_province1, town_province2_, there are `r nrow(matching)` observations left. The matching observations for other admin variables are as follows: \\
+ * adm_var1 : 5 out of 3300
+ * adm_var2 : 7 out of 3301
+ * adm_var3 : 135 out of 3299
+ * adm_var4 : 1855 out of 3421
+
+
+
+## Matching adm_var1 
+
+```{r}
+ceni_small_villes_match <- ceni_filtered %>%
+  dplyr::select(c("ceni_site_vote_ID","ceni_nom_sv","province","ceni_sect_chef_comm", "circonscription", "town_province","ceni_address_vill_avenue", 'clcr')) %>%
+  dplyr::mutate(match_var = paste(ceni_nom_sv,province, circonscription, ceni_address_vill_avenue)) %>%
+  dplyr::mutate(match_var = str_replace_all(match_var, fixed(" "), "")) %>%
+  dplyr::mutate(adm_var1 = paste(province, circonscription, ceni_address_vill_avenue)) %>%
+  dplyr::mutate(adm_var1 = gsub("[[:blank:]]", "", adm_var1))
+
+ceni_small_villes_match  <- ceni_small_villes_match %>% dplyr::mutate_at(.vars=vars(province), list(~ gsub("  ", " ", .)))
+  
+small_villes <-  unique(ceni_small_villes_match$adm_var1)
+
+
+for(s in small_villes) {
+
+  temp_ceni_small_villes_match <- ceni_small_villes_match %>%   dplyr::filter(ceni_small_villes_match$adm_var1 == s)
+  
+
+    # Generate Matching Variable SIGE
+  temp_sige_match <- sigeschools.all %>%
+    dplyr::mutate(adm_var = paste(ProvincePoliAdmin,Territoire, Sproved)) %>%
+    dplyr::mutate(adm_var = gsub("[[:blank:]]", "", adm_var)) %>%
+    dplyr::filter(adm_var == s) %>%
+    dplyr::mutate(match_var = paste(NomEcole,ProvincePoliAdmin,Territoire, Sproved)) %>%
+    dplyr::mutate(match_var = str_replace_all(match_var, fixed(" "), "")) %>%
+    dplyr::mutate(info = NA)
+  
+  temp_sige_match <- temp_sige_match %>% 
+    dplyr::mutate(match_var_trimmed = match_var) %>%
+    dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("COMPLEXESCOLAIRE|ECOLEMATERNELLE|COLLEGE|ECOLEPRIMAIRE|LYCEE|INSTITUT|INSTITUTSCIENTIFIQUE|INSTITUTTECHNIQUEAGRICOLE|INSTITUTTECHNIQUEPROFESSIONNEL|INSTITUTTECHNOLOGIQUE|GROUPESCOLAIRE|ACADEMIE", "", .))) %>%  # remove school types
+    group_by(match_var_trimmed, ProvincePoliAdmin) %>% add_count(name = "occurence") 
+  
+# Take all the 1 occurences and add other school types in here
+  temp_sige_match.expanded <- temp_sige_match[rep(row.names(temp_sige_match), ifelse(temp_sige_match$occurence==1, 8, 1)), ] %>%
+    group_by(match_var_trimmed) %>% dplyr::mutate(ind = row_number()) %>% filter(occurence == 1)
+
+  temp_sige_match.expanded$match_var_trimmed <- paste(temp_sige_match.expanded$ind, temp_sige_match.expanded$match_var_trimmed)
+
+ temp_sige_match.expanded<- temp_sige_match.expanded %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(1)\\s+(*.)", "ECOLEPRIMAIRE\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(2)\\s+(*.)", " ECOLEMATERNELLE\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(3)\\s+(*.)", " COLLEGE\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(4)\\s+(*.)", " LYCEE\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(5)\\s+(*.)", " INSTITUT\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(6)\\s+(*.)", " GROUPESCOLAIRE\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(7)\\s+(*.)", " COMPLEXESCOLAIRE\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(8)\\s+(*.)", " ACADEMIE\\2", .))) %>%
+        dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("\\s\\s", " ", .))) %>% # DOUBLE SPACE
+         dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("^\\s|\\s$", "", .))) %>%   # SINGLE SPACE BEGINNING OR END
+ dplyr::mutate(merge_exp=1)
+
+
+ temp_sige_match.final <- dplyr::bind_rows(temp_sige_match,  temp_sige_match.expanded)  %>%
+                       dplyr::mutate_at(c('merge_exp'), ~replace_na(.,0))
+
+ temp_sige_match.final <- temp_sige_match.final %>% dplyr::mutate(match_var = ifelse(occurence == 1, match_var_trimmed, match_var))
+
+ temp_sige_match.final$match_var <- as.character(temp_sige_match.final$match_var)
+
+# Take all schools without any numbers and add digits up to
+ temp_sige_match.final.exp <- temp_sige_match.final %>% dplyr::filter(!str_detect(match_var,"[0-9]")) %>% dplyr::mutate(nums = 1)
+ temp_sige_match.final.exp <- temp_sige_match.final.exp[rep(row.names(temp_sige_match.final.exp), ifelse(temp_sige_match.final.exp$nums==1, 8, 1)), ] %>% group_by(match_var) %>% dplyr::mutate(ind.exp = row_number())
+
+temp_sige_match.final.exp$match_var <- paste(temp_sige_match.final.exp$match_var,temp_sige_match.final.exp$ind.exp)
+
+temp_sige_match.final.exp <- temp_sige_match.final.exp %>%  dplyr::mutate_at(.vars=vars(match_var), list(~ gsub("\\s\\s", " ", .))) %>% # DOUBLE SPACE
+         dplyr::mutate_at(.vars=vars(match_var), list(~ gsub("^\\s|\\s$", "", .)))  %>%  # SINGLE SPACE BEGINNING OR END
+         dplyr::mutate(match_var = gsub("[[:blank:]]", "", match_var))
+
+  temp_sige_match.final.digits <- dplyr::bind_rows(temp_sige_match.final,  temp_sige_match.final.exp)
+
+ matching <- left_join(temp_ceni_small_villes_match,temp_sige_match.final.digits, by = "match_var") 
+ 
+ assign(s, matching)
+}
+
+
+a = ls()
+index = which(str_detect(a, "[[:upper:]]"))
+b = a[index]
+matching_binded_1 <- do.call(bind_rows, lapply(b, get, env=environment()))
+
+matching_binded_1_filtered <- matching_binded_1 %>%
+  dplyr::filter(!is.na(NomEcole))
+x1 <- nrow(matching_binded_1_filtered)
+y1 <- nrow(matching_binded_1)
+
+write_xlsx(matching_binded_1,paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "raw")),'matching_village_school_adm1.xlsx', sep="/"))
+```
+
+## Matching adm_var2
+
+```{r eval=FALSE, include=FALSE}
+remove(list=b)
+ceni_small_villes_match <- ceni_filtered %>%
+  dplyr::select(c("ceni_site_vote_ID","ceni_nom_sv","province","ceni_sect_chef_comm", "circonscription", "town_province","ceni_address_vill_avenue", 'clcr', "ceni_group_quart")) %>%
+  dplyr::mutate(match_var = paste(ceni_nom_sv,province, circonscription, ceni_group_quart)) %>%
+  dplyr::mutate(match_var = str_replace_all(match_var, fixed(" "), "")) %>%
+  dplyr::mutate(adm_var2 = paste(province, circonscription, ceni_group_quart)) %>%
+  dplyr::mutate(adm_var2 = gsub("[[:blank:]]", "", adm_var2))
+
+ceni_small_villes_match  <- ceni_small_villes_match %>% dplyr::mutate_at(.vars=vars(province), list(~ gsub("  ", " ", .)))
+  
+small_villes <-  unique(ceni_small_villes_match$adm_var2)
+
+
+for(s in small_villes) {
+
+  temp_ceni_small_villes_match <- ceni_small_villes_match %>%   dplyr::filter(ceni_small_villes_match$adm_var2 == s)
+  
+
+    # Generate Matching Variable SIGE
+  temp_sige_match <- sigeschools.all %>%
+    dplyr::mutate(adm_var = paste(ProvincePoliAdmin,Territoire, Sproved)) %>%
+    dplyr::mutate(adm_var = gsub("[[:blank:]]", "", adm_var)) %>%
+    dplyr::filter(adm_var == s) %>%
+    dplyr::mutate(match_var = paste(NomEcole,ProvincePoliAdmin,Territoire, Sproved)) %>%
+    dplyr::mutate(match_var = str_replace_all(match_var, fixed(" "), "")) %>%
+    dplyr::mutate(info = NA)
+  
+  temp_sige_match <- temp_sige_match %>% 
+    dplyr::mutate(match_var_trimmed = match_var) %>%
+    dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("COMPLEXESCOLAIRE|ECOLEMATERNELLE|COLLEGE|ECOLEPRIMAIRE|LYCEE|INSTITUT|INSTITUTSCIENTIFIQUE|INSTITUTTECHNIQUEAGRICOLE|INSTITUTTECHNIQUEPROFESSIONNEL|INSTITUTTECHNOLOGIQUE|GROUPESCOLAIRE|ACADEMIE", "", .))) %>%  # remove school types
+    group_by(match_var_trimmed, ProvincePoliAdmin) %>% add_count(name = "occurence") 
+  
+# Take all the 1 occurences and add other school types in here
+  temp_sige_match.expanded <- temp_sige_match[rep(row.names(temp_sige_match), ifelse(temp_sige_match$occurence==1, 8, 1)), ] %>%
+    group_by(match_var_trimmed) %>% dplyr::mutate(ind = row_number()) %>% filter(occurence == 1)
+
+  temp_sige_match.expanded$match_var_trimmed <- paste(temp_sige_match.expanded$ind, temp_sige_match.expanded$match_var_trimmed)
+
+ temp_sige_match.expanded<- temp_sige_match.expanded %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(1)\\s+(*.)", "ECOLEPRIMAIRE\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(2)\\s+(*.)", " ECOLEMATERNELLE\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(3)\\s+(*.)", " COLLEGE\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(4)\\s+(*.)", " LYCEE\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(5)\\s+(*.)", " INSTITUT\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(6)\\s+(*.)", " GROUPESCOLAIRE\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(7)\\s+(*.)", " COMPLEXESCOLAIRE\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(8)\\s+(*.)", " ACADEMIE\\2", .))) %>%
+        dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("\\s\\s", " ", .))) %>% # DOUBLE SPACE
+         dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("^\\s|\\s$", "", .))) %>%   # SINGLE SPACE BEGINNING OR END
+ dplyr::mutate(merge_exp=1)
+
+
+ temp_sige_match.final <- dplyr::bind_rows(temp_sige_match,  temp_sige_match.expanded)  %>%
+                       dplyr::mutate_at(c('merge_exp'), ~replace_na(.,0))
+
+ temp_sige_match.final <- temp_sige_match.final %>% dplyr::mutate(match_var = ifelse(occurence == 1, match_var_trimmed, match_var))
+
+ temp_sige_match.final$match_var <- as.character(temp_sige_match.final$match_var)
+
+# Take all schools without any numbers and add digits up to
+ temp_sige_match.final.exp <- temp_sige_match.final %>% dplyr::filter(!str_detect(match_var,"[0-9]")) %>% dplyr::mutate(nums = 1)
+ temp_sige_match.final.exp <- temp_sige_match.final.exp[rep(row.names(temp_sige_match.final.exp), ifelse(temp_sige_match.final.exp$nums==1, 8, 1)), ] %>% group_by(match_var) %>% dplyr::mutate(ind.exp = row_number())
+
+temp_sige_match.final.exp$match_var <- paste(temp_sige_match.final.exp$match_var,temp_sige_match.final.exp$ind.exp)
+
+temp_sige_match.final.exp <- temp_sige_match.final.exp %>%  dplyr::mutate_at(.vars=vars(match_var), list(~ gsub("\\s\\s", " ", .))) %>% # DOUBLE SPACE
+         dplyr::mutate_at(.vars=vars(match_var), list(~ gsub("^\\s|\\s$", "", .)))  %>%  # SINGLE SPACE BEGINNING OR END
+         dplyr::mutate(match_var = gsub("[[:blank:]]", "", match_var))
+
+  temp_sige_match.final.digits <- dplyr::bind_rows(temp_sige_match.final,  temp_sige_match.final.exp)
+
+ matching <- left_join(temp_ceni_small_villes_match,temp_sige_match.final.digits, by = "match_var") 
+ 
+ assign(s, matching)
+}
+
+
+a = ls()
+index = which(str_detect(a, "[[:upper:]]"))
+b = a[index]
+matching_binded_2 <- do.call(bind_rows, lapply(b, get, env=environment()))
+
+matching_binded_2_filtered <- matching_binded_2 %>%
+  dplyr::filter(!is.na(NomEcole))
+x2 <- nrow(matching_binded_2_filtered)
+y2 <- nrow(matching_binded_2)
+write_xlsx(matching_binded_2,paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "raw")),'matching_village_school_adm2.xlsx', sep="/"))
+
+```
+
+
+## Matching adm_var3
+
+```{r eval=FALSE, include=FALSE}
+remove(list=b)
+ceni_small_villes_match <- ceni_filtered %>%
+  dplyr::select(c("ceni_site_vote_ID","ceni_nom_sv","province","ceni_sect_chef_comm", "circonscription", "town_province","ceni_address_vill_avenue", 'clcr')) %>%
+  dplyr::mutate(match_var = paste(ceni_nom_sv,province, circonscription, ceni_sect_chef_comm)) %>%
+  dplyr::mutate(match_var = str_replace_all(match_var, fixed(" "), "")) %>%
+  dplyr::mutate(adm_var3 = paste(province, circonscription, ceni_sect_chef_comm)) %>%
+  dplyr::mutate(adm_var3 = gsub("[[:blank:]]", "", adm_var3))
+
+ceni_small_villes_match  <- ceni_small_villes_match %>% dplyr::mutate_at(.vars=vars(province), list(~ gsub("  ", " ", .)))
+  
+small_villes <-  unique(ceni_small_villes_match$adm_var3)
+
+
+for(s in small_villes) {
+
+  temp_ceni_small_villes_match <- ceni_small_villes_match %>%   dplyr::filter(ceni_small_villes_match$adm_var3 == s)
+  
+
+    # Generate Matching Variable SIGE
+  temp_sige_match <- sigeschools.all %>%
+    dplyr::mutate(adm_var = paste(ProvincePoliAdmin,Territoire, Sproved)) %>%
+    dplyr::mutate(adm_var = gsub("[[:blank:]]", "", adm_var)) %>%
+    dplyr::filter(adm_var == s) %>%
+    dplyr::mutate(match_var = paste(NomEcole,ProvincePoliAdmin,Territoire, Sproved)) %>%
+    dplyr::mutate(match_var = str_replace_all(match_var, fixed(" "), "")) %>%
+    dplyr::mutate(info = NA)
+  
+  temp_sige_match <- temp_sige_match %>% 
+    dplyr::mutate(match_var_trimmed = match_var) %>%
+    dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("COMPLEXESCOLAIRE|ECOLEMATERNELLE|COLLEGE|ECOLEPRIMAIRE|LYCEE|INSTITUT|INSTITUTSCIENTIFIQUE|INSTITUTTECHNIQUEAGRICOLE|INSTITUTTECHNIQUEPROFESSIONNEL|INSTITUTTECHNOLOGIQUE|GROUPESCOLAIRE|ACADEMIE", "", .))) %>%  # remove school types
+    group_by(match_var_trimmed, ProvincePoliAdmin) %>% add_count(name = "occurence") 
+  
+# Take all the 1 occurences and add other school types in here
+  temp_sige_match.expanded <- temp_sige_match[rep(row.names(temp_sige_match), ifelse(temp_sige_match$occurence==1, 8, 1)), ] %>%
+    group_by(match_var_trimmed) %>% dplyr::mutate(ind = row_number()) %>% filter(occurence == 1)
+
+  temp_sige_match.expanded$match_var_trimmed <- paste(temp_sige_match.expanded$ind, temp_sige_match.expanded$match_var_trimmed)
+
+ temp_sige_match.expanded<- temp_sige_match.expanded %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(1)\\s+(*.)", "ECOLEPRIMAIRE\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(2)\\s+(*.)", " ECOLEMATERNELLE\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(3)\\s+(*.)", " COLLEGE\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(4)\\s+(*.)", " LYCEE\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(5)\\s+(*.)", " INSTITUT\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(6)\\s+(*.)", " GROUPESCOLAIRE\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(7)\\s+(*.)", " COMPLEXESCOLAIRE\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(8)\\s+(*.)", " ACADEMIE\\2", .))) %>%
+        dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("\\s\\s", " ", .))) %>% # DOUBLE SPACE
+         dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("^\\s|\\s$", "", .))) %>%   # SINGLE SPACE BEGINNING OR END
+ dplyr::mutate(merge_exp=1)
+
+
+ temp_sige_match.final <- dplyr::bind_rows(temp_sige_match,  temp_sige_match.expanded)  %>%
+                       dplyr::mutate_at(c('merge_exp'), ~replace_na(.,0))
+
+ temp_sige_match.final <- temp_sige_match.final %>% dplyr::mutate(match_var = ifelse(occurence == 1, match_var_trimmed, match_var))
+
+ temp_sige_match.final$match_var <- as.character(temp_sige_match.final$match_var)
+
+# Take all schools without any numbers and add digits up to
+ temp_sige_match.final.exp <- temp_sige_match.final %>% dplyr::filter(!str_detect(match_var,"[0-9]")) %>% dplyr::mutate(nums = 1)
+ temp_sige_match.final.exp <- temp_sige_match.final.exp[rep(row.names(temp_sige_match.final.exp), ifelse(temp_sige_match.final.exp$nums==1, 8, 1)), ] %>% group_by(match_var) %>% dplyr::mutate(ind.exp = row_number())
+
+temp_sige_match.final.exp$match_var <- paste(temp_sige_match.final.exp$match_var,temp_sige_match.final.exp$ind.exp)
+
+temp_sige_match.final.exp <- temp_sige_match.final.exp %>%  dplyr::mutate_at(.vars=vars(match_var), list(~ gsub("\\s\\s", " ", .))) %>% # DOUBLE SPACE
+         dplyr::mutate_at(.vars=vars(match_var), list(~ gsub("^\\s|\\s$", "", .)))  %>%  # SINGLE SPACE BEGINNING OR END
+         dplyr::mutate(match_var = gsub("[[:blank:]]", "", match_var))
+
+  temp_sige_match.final.digits <- dplyr::bind_rows(temp_sige_match.final,  temp_sige_match.final.exp)
+
+ matching <- left_join(temp_ceni_small_villes_match,temp_sige_match.final.digits, by = "match_var") 
+ 
+ assign(s, matching)
+}
+
+
+a = ls()
+index = which(str_detect(a, "[[:upper:]]"))
+b = a[index]
+matching_binded_3 <- do.call(bind_rows, lapply(b, get, env=environment()))
+
+matching_binded_3_filtered <- matching_binded_3 %>%
+  dplyr::filter(!is.na(NomEcole))
+x3 <- nrow(matching_binded_3_filtered)
+y3 <- nrow(matching_binded_3)
+write_xlsx(matching_binded_3,paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "raw")),'matching_village_school_adm3.xlsx', sep="/"))
+```
+
+## Matching adm_var4
+
+```{r eval=FALSE, include=FALSE}
+#remove(list=b)
+ceni_small_villes_match <- ceni_filtered %>%
+  dplyr::select(c("ceni_site_vote_ID","ceni_nom_sv","province","ceni_sect_chef_comm", "circonscription", "town_province","ceni_address_vill_avenue", 'clcr')) %>%
+  dplyr::mutate(match_var = paste(ceni_nom_sv,province,clcr,circonscription)) %>%
+  dplyr::mutate(match_var = str_replace_all(match_var, fixed(" "), "")) %>%
+  dplyr::mutate(adm_var4 = paste(province, clcr, circonscription)) %>%
+  dplyr::mutate(adm_var4 = gsub("[[:blank:]]", "", adm_var4))
+
+ceni_small_villes_match  <- ceni_small_villes_match %>% dplyr::mutate_at(.vars=vars(province), list(~ gsub("  ", " ", .)))
+  
+small_villes <-  unique(ceni_small_villes_match$adm_var4)
+
+
+for(s in small_villes) {
+
+  temp_ceni_small_villes_match <- ceni_small_villes_match %>%   dplyr::filter(ceni_small_villes_match$adm_var4 == s)
+  
+
+    # Generate Matching Variable SIGE
+  temp_sige_match <- sigeschools.all %>%
+    dplyr::mutate(adm_var = paste(ProvincePoliAdmin,Territoire, Sproved)) %>%
+    dplyr::mutate(adm_var = gsub("[[:blank:]]", "", adm_var)) %>%
+    dplyr::filter(adm_var == s) %>%
+    dplyr::mutate(match_var = paste(NomEcole,ProvincePoliAdmin,Territoire, Sproved)) %>%
+    dplyr::mutate(match_var = str_replace_all(match_var, fixed(" "), "")) %>%
+    dplyr::mutate(info = NA)
+  
+  temp_sige_match <- temp_sige_match %>% 
+    dplyr::mutate(match_var_trimmed = match_var) %>%
+    dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("COMPLEXESCOLAIRE|ECOLEMATERNELLE|COLLEGE|ECOLEPRIMAIRE|LYCEE|INSTITUT|INSTITUTSCIENTIFIQUE|INSTITUTTECHNIQUEAGRICOLE|INSTITUTTECHNIQUEPROFESSIONNEL|INSTITUTTECHNOLOGIQUE|GROUPESCOLAIRE|ACADEMIE", "", .))) %>%  # remove school types
+    group_by(match_var_trimmed, ProvincePoliAdmin) %>% add_count(name = "occurence") 
+  
+# Take all the 1 occurences and add other school types in here
+  temp_sige_match.expanded <- temp_sige_match[rep(row.names(temp_sige_match), ifelse(temp_sige_match$occurence==1, 8, 1)), ] %>%
+    group_by(match_var_trimmed) %>% dplyr::mutate(ind = row_number()) %>% filter(occurence == 1)
+
+  temp_sige_match.expanded$match_var_trimmed <- paste(temp_sige_match.expanded$ind, temp_sige_match.expanded$match_var_trimmed)
+
+ temp_sige_match.expanded<- temp_sige_match.expanded %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(1)\\s+(*.)", "ECOLEPRIMAIRE\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(2)\\s+(*.)", " ECOLEMATERNELLE\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(3)\\s+(*.)", " COLLEGE\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(4)\\s+(*.)", " LYCEE\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(5)\\s+(*.)", " INSTITUT\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(6)\\s+(*.)", " GROUPESCOLAIRE\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(7)\\s+(*.)", " COMPLEXESCOLAIRE\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(8)\\s+(*.)", " ACADEMIE\\2", .))) %>%
+        dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("\\s\\s", " ", .))) %>% # DOUBLE SPACE
+         dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("^\\s|\\s$", "", .))) %>%   # SINGLE SPACE BEGINNING OR END
+ dplyr::mutate(merge_exp=1)
+
+
+ temp_sige_match.final <- dplyr::bind_rows(temp_sige_match,  temp_sige_match.expanded)  %>%
+                       dplyr::mutate_at(c('merge_exp'), ~replace_na(.,0))
+
+ temp_sige_match.final <- temp_sige_match.final %>% dplyr::mutate(match_var = ifelse(occurence == 1, match_var_trimmed, match_var))
+
+ temp_sige_match.final$match_var <- as.character(temp_sige_match.final$match_var)
+
+# Take all schools without any numbers and add digits up to
+ temp_sige_match.final.exp <- temp_sige_match.final %>% dplyr::filter(!str_detect(match_var,"[0-9]")) %>% dplyr::mutate(nums = 1)
+ temp_sige_match.final.exp <- temp_sige_match.final.exp[rep(row.names(temp_sige_match.final.exp), ifelse(temp_sige_match.final.exp$nums==1, 8, 1)), ] %>% group_by(match_var) %>% dplyr::mutate(ind.exp = row_number())
+
+temp_sige_match.final.exp$match_var <- paste(temp_sige_match.final.exp$match_var,temp_sige_match.final.exp$ind.exp)
+
+temp_sige_match.final.exp <- temp_sige_match.final.exp %>%  dplyr::mutate_at(.vars=vars(match_var), list(~ gsub("\\s\\s", " ", .))) %>% # DOUBLE SPACE
+         dplyr::mutate_at(.vars=vars(match_var), list(~ gsub("^\\s|\\s$", "", .)))  %>%  # SINGLE SPACE BEGINNING OR END
+         dplyr::mutate(match_var = gsub("[[:blank:]]", "", match_var))
+
+  temp_sige_match.final.digits <- dplyr::bind_rows(temp_sige_match.final,  temp_sige_match.final.exp)
+
+ matching <- left_join(temp_ceni_small_villes_match,temp_sige_match.final.digits, by = "match_var") 
+ 
+ assign(s, matching)
+}
+
+
+a = ls()
+index = which(str_detect(a, "[[:upper:]]"))
+b = a[index]
+matching_binded_4 <- do.call(bind_rows, lapply(b, get, env=environment()))
+
+matching_binded_4_filtered <- matching_binded_4 %>%
+  dplyr::filter(!is.na(NomEcole))
+x4 <- nrow(matching_binded_4_filtered)
+y4 <- nrow(matching_binded_4)
+write_xlsx(matching_binded_4,paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "raw")),'matching_village_school_adm4.xlsx', sep="/"))
+```
+
+```{r eval=FALSE, include=FALSE}
+# a=ls()
+# matching_binded_adm_var1 <- do.call(bind_rows, lapply(a[which(str_detect(a, "adm_var1"))], get, env=environment()))
+# matching_binded_adm_var2 <- do.call(bind_rows, lapply(a[which(str_detect(a, "adm_var2"))], get, env=environment()))
+# matching_binded_adm_var3 <- do.call(bind_rows, lapply(a[which(str_detect(a, "adm_var3"))], get, env=environment()))
+# matching_binded_adm_var4 <- do.call(bind_rows, lapply(a[which(str_detect(a, "adm_var4"))], get, env=environment()))
+
+for(c in col_adm){
+a = ls()
+index = which(str_detect(a, paste(c)))
+b = a[index]
+matching_binded <- do.call(bind_rows, lapply(b, get, env=environment()))
+name_final <- paste("matching_binded", c, sep="_")
+assign(name_final, matching_binded)
+rm(matching_binded)
+}
+
+```
+
+
+
+
+
+## 3. Eliminate schools which are far away
+
+To eliminate schools which are far away, I create a loop. First, I get unique administrative units based on _province_ and _circonscription_. For each of the schools in each unit, I calculate the bilateral distance. Usually, the bilateral distance is gotten as a matrix but to circumvent this problem and to be able to work with the dataset, I created another loop where I get the school names in first one row below, then second row below etc and calculate the distance between these two schools. To help you see how it looks like, I am attaching a screenshot of the data. 
+
+```{r echo=FALSE, out.width="100%"}
+knitr::include_graphics("temp_sf_ss.png") 
+```
+
+The observations in \textit{dist} columns give the bilateral distance for schools. For example, \textit{dist0} gives the distance between a school in a given row and the school below one row of it. \textit{dist1} gives the distance with the school 2 rows below. If any of these distances is below 15km, I keep that school name. I am not sure if this is a good way of eliminating schools as I might keep one school just because it is close to one school, but it might be far way from others. 
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+territoire <-  unique(matching$town_province1)
+
+for(t in territoire) {
+temp_matching <- matching %>% dplyr::filter(town_province1 == t) %>%  dplyr::select(c('ceni_site_vote_ID','province', 'circonscription', 'ceni_sect_chef_comm', 'ceni_group_quart', 'ceni_address_vill_avenue', 'ceni_nom_sv', 'GPS_longitude', 'GPS_latitude', 'match_var'))
+temp_sf <- st_as_sf(temp_matching, coords = c("GPS_longitude", "GPS_latitude"), 
+                                    crs = 4326)
+my_list <- unique(temp_sf$match_var)
+for(i in 1:length(my_list)){
+lead <- temp_sf %>% dplyr::mutate(lead = geometry[row_number() + i])
+dist <- lead %>% dplyr::mutate(dist = st_distance(geometry, lead, by_element = T))
+dist_df <- as.data.frame(dist$dist)
+dist_df <- lapply(dist_df,as.numeric)
+lead_df <- as.data.frame(lead$lead)
+match_var_2 <- temp_sf %>% dplyr::mutate(match_var_2 = match_var[row_number() + i])
+match_var_2 <- as.data.frame(match_var_2$match_var_2)
+temp_sf[paste0("lead", i-1)] <- lead_df
+temp_sf[paste0("dist", i-1)] <- dist_df
+temp_sf[paste0("match_var_", i-1)] <- match_var_2
+}
+x = nrow(temp_sf)
+if (x > 1) {
+df <- temp_sf %>% filter_at(vars(matches("dist")), any_vars(. < 35000 | . == 0))
+new_rows <- df[ , grepl( "match_var" , names(df) )]
+matched <- data.frame(match_var = na.omit(unlist(new_rows, use.names= FALSE)))
+matched_final <- as.data.frame(matched[grepl("[A-Za-z]", matched$match_var),])
+colnames(matched_final)[1] <- "match_var"
+df_final <- dplyr::filter(matching, match_var %in% matched_final$match_var)
+} else {
+  df <- temp_sf
+df_final <- dplyr::filter(matching, match_var %in% df$match_var)
+}
+
+assign(t, df_final)
+}
+
+a = ls()
+index = which(str_detect(a, "[[:upper:]]"))
+b = a[index]
+matching_binded <- do.call(bind_rows, lapply(b, get, env=environment()))
+
+
+matching_binded <- matching_binded #%>% dplyr::distinct(ceni_nom_sv, NomEcole, town_province1, town_province2, .keep_all = TRUE)
+matching_binded_f <- matching_binded %>%
+  dplyr::filter(!is.na(NomEcole))
+
+m <- nrow(matching)
+k <- nrow(matching)-nrow(matching_binded_f)
+l <- nrow(matching_binded_f)/nrow(matching)
+write_xlsx(matching_binded_f,paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "raw")),'matching_village_school_adm5_goodmatches.xlsx', sep="/"))
+
+
+```
+
+In the end, out of `r m` schools that I was able to merge just by name, I remove `r k`. So, I'm keeping `r l` schools that I was able to match just by school name initially. When I compare with the initial dataset where I had the observations matching by only the school name, the matching performance is 62 $\%$.  The results for the admin variables are as follows: //
+* __adm1__ : No obs deleted  (5 km cutoff)
+* __amd2__ : No obs deleted (10 km cutoff)
+* __adm3__ : Matches dropped from 146 to 134 (20 km cutoff)
+* __adm4__ : Matches dropped from 1887 to 1826 (25 km cutoff)
+* __adm5__:  Matches dropped from 2356 to 2324 (35 km cutoff)
+
+ * adm_var1 : province, circonscription, ceni_address_vill_avenue
+ * adm_var2 : province, circonscription, ceni_group_quart
+ * adm_var3 : province, circonscription, ceni_sect_chef_comm
+ * adm_var4 : province, clcr, circonscription
+
+
+```{r eval=FALSE, include=FALSE}
+#In this part, I'm eliminating schools which are far way for the other admin variables. I'm using the cutoffs above for each admin variable.
+rm(list=b)
+
+matchingg <- read_excel(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "raw")),'matching_village_school_adm4.xlsx', sep="/"))  %>% dplyr::mutate(adm_var4 = paste(province, clcr, circonscription), adm_var2 = paste(ProvincePoliAdmin,Territoire, Sproved)) %>% dplyr::mutate(adm_var4 = gsub("[[:blank:]]", "", adm_var4))  %>% dplyr::mutate(adm_var2 = gsub("[[:blank:]]", "", adm_var2)) 
+
+matching <- matchingg %>% dplyr::filter(!is.na(GPS_latitude)) 
+  
+territoire <-  unique(matching$adm_var2)
+
+for(t in territoire) {
+# Filter the data based on the admin variable.
+temp_matching <- matching %>% dplyr::filter(adm_var4== t) %>% dplyr::select(c('ceni_site_vote_ID','province', 'circonscription', 'ceni_sect_chef_comm', 'ceni_address_vill_avenue', 'ceni_nom_sv', 'GPS_longitude', 'GPS_latitude', 'match_var'))
+# Create the shape file
+temp_sf <- st_as_sf(temp_matching, coords = c("GPS_longitude", "GPS_latitude"), 
+                                    crs = 4326)
+my_list <- unique(temp_sf$match_var)
+# In this loop, calculate the bilateral distance between schools
+for(i in 1:length(my_list)){
+lead <- temp_sf %>% dplyr::mutate(lead = geometry[row_number() + i])
+dist <- lead %>% dplyr::mutate(dist = st_distance(geometry, lead, by_element = T))
+dist_df <- as.data.frame(dist$dist)
+dist_df <- lapply(dist_df,as.numeric)
+lead_df <- as.data.frame(lead$lead)
+match_var_2 <- temp_sf %>% dplyr::mutate(match_var_2 = match_var[row_number() + i])
+match_var_2 <- as.data.frame(match_var_2$match_var_2)
+temp_sf[paste0("lead", i-1)] <- lead_df
+temp_sf[paste0("dist", i-1)] <- dist_df
+temp_sf[paste0("match_var_", i-1)] <- match_var_2
+}
+x = nrow(temp_sf)
+if (x > 1) {
+# For the regions where there are more than one schools, drop the schools which are far away:
+df <- temp_sf %>% filter_at(vars(matches("dist")), any_vars(. < 25000 | . == 0))
+new_rows <- df[ , grepl( "match_var" , names(df) )]
+matched <- data.frame(match_var = na.omit(unlist(new_rows, use.names= FALSE)))
+matched_final <- as.data.frame(matched[grepl("[A-Za-z]", matched$match_var),])
+colnames(matched_final)[1] <- "match_var"
+df_final <- dplyr::filter(matching, match_var %in% matched_final$match_var)
+} else {
+  df <- temp_sf
+df_final <- dplyr::filter(matching, match_var %in% df$match_var)
+}
+
+assign(t, df_final)
+}
+
+a = ls()
+index = which(str_detect(a, "[[:upper:]]"))
+b = a[index]
+matching_binded <- do.call(bind_rows, lapply(b, get, env=environment()))
+
+
+matching_binded <- matching_binded #%>% dplyr::distinct(ceni_nom_sv, NomEcole, adm_var2, adm_var22, GPS_latitude, .keep_all = TRUE)
+matching_binded_f <- matching_binded %>%
+  dplyr::filter(!is.na(GPS_latitude))
+
+# Export the data as good matches
+write_xlsx(matching_binded_f,paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "raw")),'matching_village_school_adm4_goodmatches.xlsx', sep="/"))
+
+```
+
+### 4. Bring all schools together
+
+In this part,  I'm binding all the georeferenced data. After removing the duplicates by ceni_site_vote_ID, ceni_nom_sv, latitude there are 4121 distinct georeferenced observations in total. 
+
+```{r}
+#rm(list=b)
+
+merge <- read_excel(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "raw")),'ceni_group_quart.xlsx', sep="/"), col_types='text')
+ceni <- read_excel(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "raw")),'cenischools_clean_v3.xlsx', sep="/"), col_types='text')%>% dplyr::select(c('ceni_site_vote_ID', 'ceni_nom_sv'))
+df1 <- read_excel(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "raw")),'matching_village_school_adm1_goodmatches.xlsx', sep="/"), col_types='text')  %>% dplyr::select(c('ceni_site_vote_ID', 'ceni_nom_sv', 'longitude', 'latitude', 'GPS_latitude', 'GPS_longitude', 'NomEcole')) %>% left_join(merge, by=c('ceni_site_vote_ID')) %>% dplyr::select(c('ceni_site_vote_ID','province', 'circonscription', 'ceni_sect_chef_comm', 'ceni_group_quart', 'ceni_address_vill_avenue', 'ceni_nom_sv', 'longitude', 'latitude', 'GPS_latitude', 'GPS_longitude', 'NomEcole')) %>% mutate(source = 'admvar1')
+
+df2 <- read_excel(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "raw")),'matching_village_school_adm2_goodmatches.xlsx', sep="/"), col_types='text') %>% dplyr::select(c('ceni_site_vote_ID', 'ceni_nom_sv', 'longitude', 'latitude', 'GPS_latitude', 'GPS_longitude', 'NomEcole')) %>% left_join(merge, by=c('ceni_site_vote_ID')) %>% dplyr::select(c('ceni_site_vote_ID','province', 'circonscription', 'ceni_sect_chef_comm', 'ceni_group_quart', 'ceni_address_vill_avenue', 'ceni_nom_sv', 'longitude', 'latitude', 'GPS_latitude', 'GPS_longitude', 'NomEcole')) %>% mutate(source = 'admvar2')
+
+df3 <- read_excel(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "raw")),'matching_village_school_adm3_goodmatches.xlsx', sep="/"), col_types='text') %>% dplyr::select(c('ceni_site_vote_ID', 'ceni_nom_sv', 'longitude', 'latitude', 'GPS_latitude', 'GPS_longitude', 'NomEcole')) %>% left_join(merge, by=c('ceni_site_vote_ID')) %>% dplyr::select(c('ceni_site_vote_ID','province', 'circonscription', 'ceni_sect_chef_comm', 'ceni_group_quart', 'ceni_address_vill_avenue', 'ceni_nom_sv', 'longitude', 'latitude', 'GPS_latitude', 'GPS_longitude', 'NomEcole')) %>% mutate(source = 'admvar3')
+
+df4 <- read_excel(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "raw")),'matching_village_school_adm4_goodmatches.xlsx', sep="/"), col_types='text')  %>% dplyr::select(c('ceni_site_vote_ID', 'ceni_nom_sv', 'longitude', 'latitude', 'GPS_latitude', 'GPS_longitude', 'NomEcole')) %>% left_join(merge, by=c('ceni_site_vote_ID')) %>% dplyr::select(c('ceni_site_vote_ID','province', 'circonscription', 'ceni_sect_chef_comm', 'ceni_group_quart', 'ceni_address_vill_avenue', 'ceni_nom_sv', 'longitude', 'latitude', 'GPS_latitude', 'GPS_longitude', 'NomEcole')) %>% mutate(source = 'admvar4')
+
+df5 <- read_excel(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "raw")),'matching_village_school_adm5_goodmatches.xlsx', sep="/"), col_types='text') %>% dplyr::select(c('ceni_site_vote_ID', 'ceni_nom_sv', 'longitude', 'latitude', 'GPS_latitude', 'GPS_longitude', 'NomEcole')) %>% left_join(merge, by=c('ceni_site_vote_ID')) %>% dplyr::select(c('ceni_site_vote_ID','province', 'circonscription', 'ceni_sect_chef_comm', 'ceni_group_quart', 'ceni_address_vill_avenue', 'ceni_nom_sv', 'longitude', 'latitude', 'GPS_latitude', 'GPS_longitude', 'NomEcole')) %>% mutate(source = 'admvar5')
+
+
+df6 <- read_excel(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "output")),'georeference_bigcities_15km.xlsx', sep="/"), col_types='text') %>% dplyr::select(c('ceni_site_vote_ID', 'ceni_nom_sv', 'longitude', 'latitude','source')) %>% left_join(merge, by=c('ceni_site_vote_ID')) %>% dplyr::select(c('ceni_site_vote_ID','province', 'circonscription', 'ceni_sect_chef_comm', 'ceni_group_quart', 'ceni_address_vill_avenue', 'ceni_nom_sv', 'longitude', 'latitude', 'source'))
+
+df7 <- read_excel(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "output")),'georeference_kinshasa.xlsx', sep="/"), col_types='text') %>% dplyr::select(c('ceni_site_vote_ID', 'ceni_nom_sv', 'longitude', 'latitude', 'source')) %>% left_join(merge, by=c('ceni_site_vote_ID')) %>% dplyr::select(c('ceni_site_vote_ID','province', 'circonscription', 'ceni_sect_chef_comm', 'ceni_group_quart', 'ceni_address_vill_avenue', 'ceni_nom_sv', 'longitude', 'latitude', 'source'))
+
+df8 <- read_excel(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "output")),'georeference_small.xlsx', sep="/"), col_types='text') %>% dplyr::select(c('ceni_site_vote_ID', 'ceni_nom_sv', 'longitude', 'latitude', 'source')) %>% left_join(merge, by=c('ceni_site_vote_ID'))  %>% dplyr::select(c('ceni_site_vote_ID','province', 'circonscription', 'ceni_sect_chef_comm', 'ceni_group_quart', 'ceni_address_vill_avenue', 'ceni_nom_sv', 'longitude', 'latitude', 'source'))
+
+
+df9 <- read_csv(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "raw")),'Votingsites_DRC_GglAPI.csv', sep="/"), col_types = cols(ceni_site_vote_ID = col_character())) %>% left_join(merge, by=c('ceni_site_vote_ID'))  %>% dplyr::select(c('ceni_site_vote_ID','province', 'circonscription', 'ceni_sect_chef_comm', 'ceni_group_quart', 'ceni_address_vill_avenue', 'longitude', 'latitude')) %>% mutate(source = 'api')
+
+df_village_school <- bind_rows(df1, df2, df3, df4, df5) 
+df_temp1 <- rbind_dfs(df_village_school, df6)
+df_temp2 <- rbind_dfs(df_temp1, df7)
+df_final <- rbind_dfs(df_temp2, df8)
+
+`%notin%` <- Negate(`%in%`)
+# Add Google API coordinates if the ceni_site_vote_ID doesn't already exist in the data
+df10 <- dplyr::filter(df9, ceni_site_vote_ID %notin% df_final$ceni_site_vote_ID )
+
+# Bring all the data points together and remove duplicates by ceni_site_vote_ID, ceni_nom_sv, and latitude.
+df_all <- rbind_dfs(df_final, df10, clearRowNames = TRUE) %>% dplyr::filter(!is.na(longitude)) %>% dplyr::mutate(ceni_nom_sv = gsub("[[:blank:]]", "",ceni_nom_sv)) %>% dplyr::mutate(identifier = paste(ceni_site_vote_ID, ceni_nom_sv, latitude)) %>% dplyr::mutate(identifier = gsub("[[:blank:]]", "",identifier))
+
+
+df_all$longitude <- as.numeric(df_all$longitude)
+df_all$latitude <- as.numeric(df_all$latitude)
+
+df_all <- df_all  %>% dplyr::filter(!is.na(latitude)) %>% dplyr::distinct(identifier, .keep_all=TRUE)
+
+# Export the data
+write_xlsx(df_all,paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "output")),'df_georef_all.xlsx', sep="/"))
+
+
+```
+
+
+## 5. Create buffer and add schools
+
+For each admin unit, I'm performing incremental buffering. I take all the schools matched and take the average of coordinates and then create buffers of different km. For the km information, see the excel file names in write_xlsx parts.
+
+### 5.1. First buffer
+
+The first buffer is created for province, circonscription, ceni_sect_chef_comm, ceni_group_quart, ceni_address_vill_avenue. For all of the buffers in the first admin variable, there is no increase in the georeferenced school numbers.
+
+```{r}
+rm(list=b)
+`%notin%` <- Negate(`%in%`)
+# This is where I change the xlsx file name as I add schools by different buffers incrementally:
+df_all <- read_excel(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "output")),'matching_buffers1_5km.xlsx', sep="/"), col_types='text')
+# If there are any duplicates by ceni_site_vote_ID, ceni_nom_sv, and latitude remove them:
+matching_adm1 <- df_all %>% dplyr::mutate(ceni_nom_sv = gsub("[[:blank:]]", "",ceni_nom_sv)) %>% dplyr::mutate(admvar = paste(province, circonscription, ceni_sect_chef_comm, ceni_group_quart, ceni_address_vill_avenue)) %>% dplyr::mutate(school = ceni_nom_sv) %>% dplyr::mutate(NomEcole = gsub("[[:blank:]]", "", NomEcole)) %>% dplyr::mutate(admvar = gsub("[[:blank:]]", "", admvar)) %>% dplyr::mutate(identifier = paste(ceni_site_vote_ID, ceni_nom_sv, latitude)) %>% dplyr::mutate(identifier = gsub("[[:blank:]]", "",identifier)) %>% dplyr::distinct(identifier, .keep_all=TRUE)
+
+matching_adm1$longitude <- as.numeric(matching_adm1$longitude)
+matching_adm1$latitude <- as.numeric(matching_adm1$latitude)
+
+# Take the means of latitude and longitude for each admin unit group:
+temp1 <- matching_adm1  %>% group_by(admvar) %>% dplyr::summarise(across(c("latitude", "longitude"), ~ mean(.x, na.rm = TRUE)))
+
+ceni <- read_excel(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "raw")),'cenischools_clean_v3.xlsx', sep="/")) %>% dplyr::mutate(ceni_nom_sv = gsub("[[:blank:]]", "",ceni_nom_sv)) %>% dplyr::mutate(admvar = paste(province, circonscription, ceni_sect_chef_comm, ceni_group_quart, ceni_address_vill_avenue)) %>% dplyr::mutate(school = ceni_nom_sv)%>% dplyr::mutate(admvar = gsub("[[:blank:]]", "", admvar))
+  
+sige <- sigeschools.all %>% dplyr::mutate(NomEcole = gsub("[[:blank:]]", "", NomEcole)) %>% dplyr::mutate(school = NomEcole) %>% dplyr::filter(NomEcole %notin% matching_adm1$NomEcole)
+
+sige$longitude <- as.numeric(sige$longitude)
+sige$latitude <- as.numeric(sige$latitude)
+
+coordinates_sf = st_as_sf(sige, coords = c("GPS_longitude", "GPS_latitude"), 
+                                    crs = 4326)
+
+  
+
+small_villes <-  unique(temp1$admvar)
+
+for(s in small_villes) {
+  
+  temp <- temp1 %>% dplyr::filter(admvar == s)
+  temp_admin <- matching_adm1 %>% dplyr::filter(admvar == s)
+  
+  # Make sure you keep the CENI schools which are not already georeferenced: 
+  
+  temp_ceni <- ceni %>% dplyr::filter(ceni_nom_sv %notin% df_all$ceni_nom_sv) %>% dplyr::filter(admvar == s)
+
+  temp_sf = st_as_sf(temp, coords = c("longitude", "latitude"), 
+                                    crs = 4326)
+  # Create buffer around the mean coordinates:
+  temp_buffer <- st_buffer(temp_sf, 8000)
+  
+  admin <- st_join(coordinates_sf,  temp_buffer, left=FALSE) 
+  # Merge data by the school name
+  matching <- left_join(temp_ceni,admin, by = "school")
+  matching_f <- rbind_dfs(temp_admin, matching, clearRowNames = TRUE)
+  assign(s, matching)
+  
+} 
+
+a = ls()
+index = which(a %in% small_villes)
+b = a[index]
+
+matching_binded1 <- do.call(bind_rows, lapply(b, get, env=environment()))
+matching_adm1$ceni_site_vote_ID <- as.numeric(matching_adm1$ceni_site_vote_ID)
+matching_final1 <- dplyr::bind_rows(matching_adm1, matching_binded1)
+
+
+test <- matching_final1  %>% dplyr::filter(!is.na(latitude)) %>% dplyr::mutate(identifier = paste(ceni_site_vote_ID, ceni_nom_sv, latitude)) %>% dplyr::mutate(identifier = gsub("[[:blank:]]", "",identifier)) %>% dplyr::distinct(identifier, .keep_all=TRUE)
+
+test<- test[, 1:15]
+
+#write_xlsx(test,paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "output")),'matching_buffers1_3km.xlsx', sep="/"))
+#write_xlsx(test,paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "output")),'matching_buffers1_5km.xlsx', sep="/"))
+write_xlsx(test,paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "output")),'matching_buffers1_8km.xlsx', sep="/"))
+```
+
+
+### 5.2. Second buffer
+
+The second buffer is created for province, circonscription, ceni_sect_chef_comm, ceni_group_quart. To begin with there are 4121 observations, and the number of observations for each buffer is as follows:
+
+  * Initial:        4121
+  * 5 km buffer:    4504
+  * 8 km buffer:    4769
+  * 10 km buffer:   4938
+
+```{r}
+rm(list=b)
+`%notin%` <- Negate(`%in%`)
+df <- read_excel(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "output")),'matching_buffers2_8km.xlsx',sep="/"), col_types="text")
+df[,8:11] <- lapply(df[,8:11], as.numeric)
+df$ceni_site_vote_ID <- as.numeric(df$ceni_site_vote_ID)
+matching_adm1 <- df %>% dplyr::mutate(ceni_nom_sv = gsub("[[:blank:]]", "",ceni_nom_sv)) %>% dplyr::mutate(admvar = paste(province, circonscription, ceni_sect_chef_comm, ceni_group_quart)) %>% dplyr::mutate(school = ceni_nom_sv) %>% dplyr::mutate(NomEcole = gsub("[[:blank:]]", "", NomEcole)) %>% dplyr::mutate(admvar = gsub("[[:blank:]]", "", admvar)) %>% dplyr::mutate(identifier = gsub("[[:blank:]]", "",identifier)) %>% dplyr::distinct(identifier, .keep_all=TRUE)
+
+matching_adm1$longitude <- as.numeric(matching_adm1$longitude)
+matching_adm1$latitude <- as.numeric(matching_adm1$latitude)
+
+temp1 <- matching_adm1  %>% group_by(admvar) %>% dplyr::summarise(across(c("latitude", "longitude"), ~ mean(.x, na.rm = TRUE)))
+
+ceni <- read_excel(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "raw")),'cenischools_clean_v3.xlsx', sep="/")) %>% dplyr::mutate(ceni_nom_sv = gsub("[[:blank:]]", "",ceni_nom_sv)) %>% dplyr::mutate(admvar = paste(province, circonscription, ceni_sect_chef_comm, ceni_group_quart)) %>% dplyr::mutate(school = ceni_nom_sv)%>% dplyr::mutate(admvar = gsub("[[:blank:]]", "", admvar))
+  
+sige <- sigeschools.all %>% dplyr::mutate(NomEcole = gsub("[[:blank:]]", "", NomEcole)) %>% dplyr::mutate(school = NomEcole) %>% dplyr::filter(NomEcole %notin% matching_adm1$NomEcole)
+
+sige$longitude <- as.numeric(sige$longitude)
+sige$latitude <- as.numeric(sige$latitude)
+
+coordinates_sf = st_as_sf(sige, coords = c("GPS_longitude", "GPS_latitude"), 
+                                    crs = 4326)
+
+  
+
+small_villes <-  unique(temp1$admvar)
+
+for(s in small_villes) {
+  
+  temp <- temp1 %>% dplyr::filter(admvar == s)
+  
+  temp_admin <- matching_adm1 %>% dplyr::filter(admvar == s)
+  
+  temp_ceni <- ceni %>% dplyr::filter(admvar == s) %>% dplyr::filter(ceni_nom_sv %notin% df$ceni_nom_sv)
+
+     
+
+  temp_sf = st_as_sf(temp, coords = c("longitude", "latitude"), 
+                                    crs = 4326)
+    
+  temp_buffer <- st_buffer(temp_sf,10000)
+  
+
+  admin <- st_join(coordinates_sf,  temp_buffer, left=FALSE) 
+  
+  
+  matching <- left_join(temp_ceni,admin, by = "school")
+  matching_f <- rbind_dfs(temp_admin, matching, clearRowNames = TRUE)
+  assign(s, matching)
+  
+} 
+
+a = ls()
+#index = which(str_detect(a, "[[:upper:]]|Â"))
+index = which(a %in% small_villes)
+b = a[index]
+
+matching_binded1 <- do.call(bind_rows, lapply(b, get, env=environment()))
+matching_binded1 <- matching_binded1 %>% dplyr::mutate(source = "adm2_10km")
+matching_adm1$ceni_site_vote_ID <- as.numeric(matching_adm1$ceni_site_vote_ID)
+matching_final1 <- dplyr::bind_rows(matching_adm1, matching_binded1)
+
+test <- matching_final1  %>% dplyr::filter(!is.na(latitude)) %>% dplyr::mutate(identifier = paste(ceni_site_vote_ID, ceni_nom_sv, latitude)) %>% dplyr::mutate(identifier = gsub("[[:blank:]]", "",identifier)) %>% dplyr::distinct(identifier, .keep_all=TRUE)
+
+test<- test[, 1:15]
+
+#write_xlsx(test,paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "output")),'matching_buffers2_5km.xlsx', sep="/"))
+#write_xlsx(test,paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "output")),'matching_buffers2_8km.xlsx', sep="/"))
+write_xlsx(test,paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "output")),'matching_buffers2_10km.xlsx', sep="/"))
+
+```
+
+
+### 5.3. Third buffer
+
+The third buffer is created for province, circonscription, ceni_sect_chef_comm.The final number of observations for each buffer is as follows:
+
+  * Initial:        4938
+  * 8 km buffer:    5326
+  * 15 km buffer:   6016
+  * 20 km buffer:   6617
+
+```{r}
+rm(list=b)
+`%notin%` <- Negate(`%in%`)
+df <- read_excel(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "output")),'matching_buffers3_15km.xlsx',sep="/"), col_types="text")
+df[,8:11] <- lapply(df[,8:11], as.numeric)
+df$ceni_site_vote_ID <- as.numeric(df$ceni_site_vote_ID)
+matching_adm1 <- df %>% dplyr::mutate(ceni_nom_sv = gsub("[[:blank:]]", "",ceni_nom_sv)) %>% dplyr::mutate(admvar = paste(province, circonscription, ceni_sect_chef_comm)) %>% dplyr::mutate(school = ceni_nom_sv) %>% dplyr::mutate(NomEcole = gsub("[[:blank:]]", "", NomEcole)) %>% dplyr::mutate(admvar = gsub("[[:blank:]]", "", admvar)) %>% dplyr::mutate(identifier = gsub("[[:blank:]]", "",identifier)) %>% dplyr::distinct(identifier, .keep_all=TRUE)
+
+matching_adm1$longitude <- as.numeric(matching_adm1$longitude)
+matching_adm1$latitude <- as.numeric(matching_adm1$latitude)
+
+temp1 <- matching_adm1  %>% group_by(admvar) %>% dplyr::summarise(across(c("latitude", "longitude"), ~ mean(.x, na.rm = TRUE)))
+
+ceni <-read_excel(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "raw")),'cenischools_clean_v3.xlsx', sep="/")) %>% dplyr::mutate(ceni_nom_sv = gsub("[[:blank:]]", "",ceni_nom_sv)) %>% dplyr::mutate(admvar = paste(province, circonscription, ceni_sect_chef_comm)) %>% dplyr::mutate(school = ceni_nom_sv)%>% dplyr::mutate(admvar = gsub("[[:blank:]]", "", admvar))
+  
+sige <- sigeschools.all %>% dplyr::mutate(NomEcole = gsub("[[:blank:]]", "", NomEcole)) %>% dplyr::mutate(school = NomEcole) %>% dplyr::filter(NomEcole %notin% matching_adm1$NomEcole)
+
+sige$longitude <- as.numeric(sige$longitude)
+sige$latitude <- as.numeric(sige$latitude)
+
+coordinates_sf = st_as_sf(sige, coords = c("GPS_longitude", "GPS_latitude"), 
+                                    crs = 4326)
+
+  
+
+small_villes <-  unique(temp1$admvar)
+
+for(s in small_villes) {
+  
+  temp <- temp1 %>% dplyr::filter(admvar == s)
+  
+  temp_admin <- matching_adm1 %>% dplyr::filter(admvar == s)
+  
+  temp_ceni <- ceni %>% dplyr::filter(admvar == s) %>% dplyr::filter(ceni_nom_sv %notin% df$ceni_nom_sv)
+
+     
+
+  temp_sf = st_as_sf(temp, coords = c("longitude", "latitude"), 
+                                    crs = 4326)
+    
+  temp_buffer <- st_buffer(temp_sf, 20000)
+  
+
+  admin <- st_join(coordinates_sf,  temp_buffer, left=FALSE) 
+  
+  
+  matching <- left_join(temp_ceni,admin, by = "school")
+  matching_f <- rbind_dfs(temp_admin, matching, clearRowNames = TRUE)
+  assign(s, matching)
+  
+} 
+
+a = ls()
+index = which(a %in% small_villes)
+b = a[index]
+
+matching_binded1 <- do.call(bind_rows, lapply(b, get, env=environment()))
+matching_binded1 <- matching_binded1 %>% dplyr::mutate(source = "adm3_20km")
+matching_adm1$ceni_site_vote_ID <- as.numeric(matching_adm1$ceni_site_vote_ID)
+matching_final1 <- dplyr::bind_rows(matching_adm1, matching_binded1)
+
+test <- matching_final1  %>% dplyr::filter(!is.na(latitude)) %>% dplyr::mutate(identifier = paste(ceni_site_vote_ID, ceni_nom_sv, latitude)) %>% dplyr::mutate(identifier = gsub("[[:blank:]]", "",identifier)) %>% dplyr::distinct(identifier, .keep_all=TRUE)
+
+test<- test[, 1:15]
+
+#write_xlsx(test,paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "output")),'matching_buffers3_8km.xlsx', sep="/"))
+#write_xlsx(test,paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "output")),'matching_buffers3_15km.xlsx', sep="/"))
+write_xlsx(test,paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "output")),'matching_buffers3_20km.xlsx', sep="/"))
+```
+
+
+### 5.4. Fourth buffer
+
+The fourth buffer is created for province, circonscription. The final number of observations for each buffer is as follows:
+
+  * Initial:        6617
+  * 20 km buffer:   7080
+  * 25 km buffer:   7362
+  * 30 km buffer:   7607
+  * 35 km buffer:   7847
+  * 40 km buffer:   8134
+  
+These are the results if I drop duplicates by ceni_site_vote_ID, ceni_nom_sv and latitude. If the duplicates are dropped by just ceni_site_vote_ID and ceni_nom_sv, there are 7846 unique observations instead of 8134.
+
+```{r}
+rm(list=b)
+`%notin%` <- Negate(`%in%`)
+df <- read_excel(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "output")),'matching_buffers4_35km.xlsx',sep="/"), col_types="text")
+df[,8:11] <- lapply(df[,8:11], as.numeric)
+df$ceni_site_vote_ID <- as.numeric(df$ceni_site_vote_ID)
+matching_adm1 <- df %>% dplyr::mutate(ceni_nom_sv = gsub("[[:blank:]]", "",ceni_nom_sv)) %>% dplyr::mutate(admvar = paste(province, circonscription)) %>% dplyr::mutate(school = ceni_nom_sv) %>% dplyr::mutate(NomEcole = gsub("[[:blank:]]", "", NomEcole)) %>% dplyr::mutate(admvar = gsub("[[:blank:]]", "", admvar))  %>% dplyr::mutate(identifier = gsub("[[:blank:]]", "",identifier)) %>% dplyr::distinct(identifier, .keep_all=TRUE)
+
+matching_adm1$longitude <- as.numeric(matching_adm1$longitude)
+matching_adm1$latitude <- as.numeric(matching_adm1$latitude)
+
+
+temp1 <- matching_adm1  %>% group_by(admvar) %>% dplyr::summarise(across(c("latitude", "longitude"), ~ mean(.x, na.rm = TRUE)))
+
+ceni <- read_excel(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "raw")),'cenischools_clean_v3.xlsx', sep="/")) %>% dplyr::mutate(ceni_nom_sv = gsub("[[:blank:]]", "",ceni_nom_sv)) %>% dplyr::mutate(admvar = paste(province, circonscription)) %>% dplyr::mutate(school = ceni_nom_sv)%>% dplyr::mutate(admvar = gsub("[[:blank:]]", "", admvar))
+  
+sige <- sigeschools.all %>% dplyr::mutate(NomEcole = gsub("[[:blank:]]", "", NomEcole)) %>% dplyr::mutate(school = NomEcole) %>% dplyr::filter(NomEcole %notin% matching_adm1$NomEcole)
+
+sige$longitude <- as.numeric(sige$longitude)
+sige$latitude <- as.numeric(sige$latitude)
+
+coordinates_sf = st_as_sf(sige, coords = c("GPS_longitude", "GPS_latitude"), 
+                                    crs = 4326)
+
+  
+
+small_villes <-  unique(temp1$admvar)
+
+for(s in small_villes) {
+  
+  temp <- temp1 %>% dplyr::filter(admvar == s)
+  
+  temp_admin <- matching_adm1 %>% dplyr::filter(admvar == s)
+  
+  temp_ceni <- ceni %>% dplyr::filter(admvar == s) %>% dplyr::filter(ceni_nom_sv %notin% df$ceni_nom_sv)
+
+     
+
+  temp_sf = st_as_sf(temp, coords = c("longitude", "latitude"), 
+                                    crs = 4326)
+    
+  temp_buffer <- st_buffer(temp_sf, 40000)
+  
+
+  admin <- st_join(coordinates_sf,  temp_buffer, left=FALSE) 
+  
+  
+  matching <- left_join(temp_ceni,admin, by = "school")
+  matching_f <- rbind_dfs(temp_admin, matching, clearRowNames = TRUE)
+  assign(s, matching)
+  
+} 
+
+a = ls()
+#index = which(str_detect(a, "[[:upper:]]|Â"))
+index = which(a %in% small_villes)
+b = a[index]
+
+matching_binded1 <- do.call(bind_rows, lapply(b, get, env=environment()))
+matching_binded1 <- matching_binded1 %>% dplyr::mutate(source = "adm4_40km")
+matching_adm1$ceni_site_vote_ID <- as.numeric(matching_adm1$ceni_site_vote_ID)
+matching_final1 <- dplyr::bind_rows(matching_adm1, matching_binded1)
+
+test <- matching_final1  %>% dplyr::filter(!is.na(latitude)) %>% dplyr::mutate(identifier = paste(ceni_site_vote_ID, ceni_nom_sv, latitude)) %>% dplyr::mutate(identifier = gsub("[[:blank:]]", "",identifier)) %>% dplyr::distinct(identifier, .keep_all=TRUE)
+
+test<- test[, 1:15]
+
+#write_xlsx(test,paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "output")),'matching_buffers4_20km.xlsx', sep="/"))
+#write_xlsx(test,paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "output")),'matching_buffers4_25km.xlsx', sep="/"))
+#write_xlsx(test,paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "output")),'matching_buffers4_30km.xlsx', sep="/"))
+#write_xlsx(test,paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "output")),'matching_buffers4_35km.xlsx', sep="/"))
+write_xlsx(test,paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "output")),'matching_buffers4_40km.xlsx', sep="/"))
+
+hmm <- read_excel(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "output")),'matching_buffers4_40km.xlsx',sep="/"), col_types="text") %>% dplyr::mutate(identifier = paste(ceni_site_vote_ID, ceni_nom_sv)) %>% dplyr::mutate(identifier = gsub("[[:blank:]]", "",identifier)) %>% dplyr::distinct(identifier, .keep_all=TRUE)
+
+```
+
+
+### 5.5. Fifth buffer
+
+The fifth buffer is created for province, circonscription. The final number of observations for each buffer is as follows:
+
+  * Initial:        8134
+  * 40 km buffer:   8740
+  * 45 km buffer:   8811
+  * 50 km buffer:   8906
+  * 55 km buffer:   8990
+  * 60 km buffer:   9080
+  * 65 km buffer:   9154
+  * 70 km buffer:   9224
+  * 75 km buffer:   9306
+  * 80 km buffer:   9377
+
+These are the results if I drop duplicates by ceni_site_vote_ID, ceni_nom_sv and latitude. If the duplicates are dropped by just ceni_site_vote_ID and ceni_nom_sv, there are 8730 unique observations instead of 9377.
+
+
+```{r}
+rm(list=b)
+`%notin%` <- Negate(`%in%`)
+df <- read_excel(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "output")),'matching_buffers5_75km.xlsx',sep="/"), col_types="text")
+df[,8:11] <- lapply(df[,8:11], as.numeric)
+df$ceni_site_vote_ID <- as.numeric(df$ceni_site_vote_ID)
+matching_adm1 <- df %>% dplyr::mutate(ceni_nom_sv = gsub("[[:blank:]]", "",ceni_nom_sv)) %>% dplyr::mutate(admvar = paste(province)) %>% dplyr::mutate(school = ceni_nom_sv) %>% dplyr::mutate(NomEcole = gsub("[[:blank:]]", "", NomEcole)) %>% dplyr::mutate(admvar = gsub("[[:blank:]]", "", admvar))
+
+matching_adm1$longitude <- as.numeric(matching_adm1$longitude)
+matching_adm1$latitude <- as.numeric(matching_adm1$latitude)
+
+
+temp1 <- matching_adm1  %>% group_by(admvar) %>% dplyr::summarise(across(c("latitude", "longitude"), ~ mean(.x, na.rm = TRUE)))
+
+ceni <- read_excel(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "raw")),'cenischools_clean_v3.xlsx', sep="/")) %>% dplyr::mutate(ceni_nom_sv = gsub("[[:blank:]]", "",ceni_nom_sv)) %>% dplyr::mutate(admvar = paste(province)) %>% dplyr::mutate(school = ceni_nom_sv)%>% dplyr::mutate(admvar = gsub("[[:blank:]]", "", admvar))
+  
+sige <- sigeschools.all %>% dplyr::mutate(NomEcole = gsub("[[:blank:]]", "", NomEcole)) %>% dplyr::mutate(school = NomEcole) %>% dplyr::filter(NomEcole %notin% matching_adm1$NomEcole)
+
+sige$longitude <- as.numeric(sige$longitude)
+sige$latitude <- as.numeric(sige$latitude)
+
+coordinates_sf = st_as_sf(sige, coords = c("GPS_longitude", "GPS_latitude"), 
+                                    crs = 4326)
+
+  
+
+small_villes <-  unique(temp1$admvar)
+
+for(s in small_villes) {
+  
+  temp <- temp1 %>% dplyr::filter(admvar == s)
+  
+  temp_admin <- matching_adm1 %>% dplyr::filter(admvar == s)
+  
+  temp_ceni <- ceni %>% dplyr::filter(admvar == s)
+
+     
+
+  temp_sf = st_as_sf(temp, coords = c("longitude", "latitude"), 
+                                    crs = 4326)
+    
+  temp_buffer <- st_buffer(temp_sf, 80000)
+  
+
+  admin <- st_join(coordinates_sf,  temp_buffer, left=FALSE) 
+  
+  
+  matching <- left_join(temp_ceni,admin, by = "school")
+  matching_f <- rbind_dfs(temp_admin, matching, clearRowNames = TRUE)
+  assign(s, matching)
+  
+} 
+
+a = ls()
+#index = which(str_detect(a, "[[:upper:]]|Â"))
+index = which(a %in% small_villes)
+b = a[index]
+
+matching_binded1 <- do.call(bind_rows, lapply(b, get, env=environment()))
+matching_binded1 <- matching_binded1 %>% dplyr::mutate(source = "adm5_80km")
+matching_adm1$ceni_site_vote_ID <- as.numeric(matching_adm1$ceni_site_vote_ID)
+matching_final1 <- dplyr::bind_rows(matching_adm1, matching_binded1)
+
+test <- matching_final1  %>% dplyr::filter(!is.na(latitude)) %>% dplyr::mutate(identifier = paste(ceni_site_vote_ID, ceni_nom_sv, latitude)) %>% dplyr::mutate(identifier = gsub("[[:blank:]]", "",identifier)) %>% dplyr::distinct(identifier, .keep_all=TRUE)
+
+test<- test[, 1:15]
+
+#write_xlsx(test,paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "output")),'matching_buffers5_40km.xlsx', sep="/"))
+#write_xlsx(test,paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "output")),'matching_buffers5_45km.xlsx', sep="/"))
+#write_xlsx(test,paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "output")),'matching_buffers5_50km.xlsx', sep="/"))
+#write_xlsx(test,paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "output")),'matching_buffers5_55km.xlsx', sep="/"))
+#write_xlsx(test,paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "output")),'matching_buffers5_60km.xlsx', sep="/"))
+#write_xlsx(test,paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "output")),'matching_buffers5_65km.xlsx', sep="/"))
+#write_xlsx(test,paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "output")),'matching_buffers5_70km.xlsx', sep="/"))
+#write_xlsx(test,paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "output")),'matching_buffers5_75km.xlsx', sep="/"))
+write_xlsx(test,paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "output")),'matching_buffers5_80km.xlsx', sep="/"))
+
+hmm <- read_excel(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "output")),'matching_buffers5_80km.xlsx',sep="/"), col_types="text") %>% dplyr::mutate(identifier = paste(ceni_site_vote_ID, ceni_nom_sv)) %>% dplyr::mutate(identifier = gsub("[[:blank:]]", "",identifier)) %>% dplyr::distinct(identifier, .keep_all=TRUE)
+```
+
+

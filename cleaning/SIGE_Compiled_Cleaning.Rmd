@@ -1,0 +1,1057 @@
+---
+title: "SIGE School Name Cleaning"
+output:
+  html_document:
+    code_folding: hide
+---
+
+
+
+Preliminary/Setup
+```{r}
+rm(list=ls())
+
+library(dplyr)
+library(plyr)
+library(tidyverse)
+library(stringr)
+library(readxl)
+library(ggplot2)
+library(rstudioapi)
+library(here) # Package to access parent directory while reading files (to rerun the code smoothly anywhere)
+
+# Set the path current open file
+current_path = rstudioapi::getActiveDocumentContext()$path 
+setwd(dirname(current_path ))
+```
+
+Load and bind the data
+```{r}
+# Load School df
+kindergarten_raw <- read_excel(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "raw")),'Maternelles_BDD Géolocalisation RDC_edited.xlsx', sep="/"))
+primary_raw <- read_excel(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "raw")),'Primaires_BDD Géolocalisation RDC_edited.xlsx', sep="/"))
+secondary_raw <- read_excel(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "raw")),'Secondaires_BDD Géolocalisation RDC_edited.xlsx', sep="/"))
+
+## Process School data
+kindergarten <- kindergarten_raw %>%
+  dplyr::filter(!is.na(GPS_latitude)) %>%
+  dplyr::filter(!is.na(GPS_longitude)) %>%
+  dplyr::mutate(latitude = GPS_latitude) %>%
+  dplyr::mutate(longitude = GPS_longitude) %>%
+  dplyr::mutate(GPS_latitude = round(as.numeric(GPS_latitude), 4)) %>%
+  dplyr::mutate(GPS_longitude = round(as.numeric(GPS_longitude), 4)) %>%
+  dplyr::select(NomEcole, GPS_latitude, GPS_longitude, latitude, longitude, ProvincePoliAdmin, Proved, Sproved, Territoire) %>%
+  dplyr::mutate(source = "kindergarten") %>%
+  dplyr::mutate(school_id = paste("EM_",row_number()))
+
+primary <- primary_raw %>%
+  dplyr::filter(!is.na(GPS_latitude)) %>%
+  dplyr::filter(!is.na(GPS_longitude)) %>%
+  dplyr::mutate(latitude = GPS_latitude) %>%
+  dplyr::mutate(longitude = GPS_longitude) %>%
+  dplyr::mutate(GPS_latitude = round(as.numeric(GPS_latitude), 4)) %>%
+  dplyr::mutate(GPS_longitude = round(as.numeric(GPS_longitude), 4)) %>%
+  dplyr::select(NomEcole, GPS_latitude, GPS_longitude, latitude, longitude, ProvincePoliAdmin, Proved, Sproved, Territoire) %>%
+  dplyr::mutate(source = "primary") %>%
+  dplyr::mutate(school_id = paste("PR_",row_number()))
+
+secondary <- secondary_raw %>%
+  dplyr::filter(!is.na(GPS_latitude)) %>%
+  dplyr::filter(!is.na(GPS_longitude)) %>%
+  dplyr::mutate(latitude = GPS_latitude) %>%
+  dplyr::mutate(longitude = GPS_longitude) %>%
+  dplyr::mutate(GPS_latitude = round(as.numeric(GPS_latitude), 4)) %>%
+  dplyr::mutate(GPS_longitude = round(as.numeric(GPS_longitude), 4)) %>%
+  dplyr::select(NomEcole, GPS_latitude, GPS_longitude, latitude, longitude, ProvincePoliAdmin, Proved, Sproved, Territoire) %>%
+  dplyr::mutate(source = "secondary") %>%
+  dplyr::mutate(school_id = paste("SC_",row_number()))
+
+allschools <- rbind(kindergarten, primary)
+allschools <- rbind(allschools, secondary) 
+
+### Some schools have the exact same name, latitude and longitude
+
+allschools <- allschools %>%
+  dplyr::distinct(NomEcole,GPS_latitude,GPS_longitude, .keep_all = TRUE)
+
+allschools$NomEcole_original <- allschools$NomEcole
+allschools <- allschools %>% relocate(NomEcole_original, .before=NomEcole)
+
+rm(kindergarten, kindergarten_raw, primary, primary_raw, secondary, secondary_raw)
+```
+
+
+Identify errors
+```{r}
+allschools <- allschools %>%
+  dplyr::mutate(pb1a = ifelse(str_detect(NomEcole, "[^'[:^punct:]]"), 1, 0)) %>% # PUNCTUATION
+  dplyr::mutate(pb1b = ifelse(str_detect(NomEcole, "Ã…â€™|Å’|Ã‡|Ã”|Ã›"), 1, 0)) %>% # SPECIAL CHARACTERS
+  dplyr::mutate(pb1c = ifelse(str_detect(NomEcole, "\\s\\s"), 1, 0)) %>% # DOUBLE SPACE
+  dplyr::mutate(pb1d = ifelse(str_detect(NomEcole, "^\\s"), 1, 0)) %>% # SINGLE SPACE BEGINING NAME
+  dplyr::mutate(pb1e = ifelse(str_detect(NomEcole, "\\s$"), 1, 0)) %>% # SINGLE SPACE END NAME
+  dplyr::mutate(pb2 = ifelse(str_detect(NomEcole, "^EM\\b\\s\\w{3,}\\sECOLE\\sMATERNELLE$|
+                                        ^GS\\s\\w{3,}\\sGROUPE\\sSCOLAIRE$|
+                                        ^EP\\s\\w{3,}\\sECOLE\\sPRIMAIRE$|
+                                        ^CS\\s\\w{3,}\\sCOMPLEXE\\sSCOLAIRE$|
+                                        ^INST\\s\\w{3,}\\sINSTITUT$|
+                                        ^IPRO\\s\\w{3,}\\sINSTITUT$|^IPRO\\b\\sINSTITUT$|
+                                        ^ITA\\s\\w{3,}\\sINSTITUT$|^ITA\\b\\sINSTITUT$|
+                                        ^ITI\\s\\w{3,}\\sINSTITUT$"), 1, 0)) %>% # STARTS ABBREVIATIONS ENDS WITH FULL NAME
+  dplyr::mutate(pb3 = ifelse(str_detect(NomEcole, "^INST |^EM |^EP |^CS |^GS |^IPRO |^ITI |^ITA "), 1, 0)) %>% # STARTS WITH ABBR
+  dplyr::mutate(pb4 = ifelse(str_detect(NomEcole, " E M |^E M | C S |^C S |G S |^G S "), 1, 0)) %>% # SPACE IN BETWEEN ECOLE ABBR
+  dplyr::mutate(pb5 = ifelse(str_detect(NomEcole, "INSTITUT$|
+                                                  \\sECOLE\\sMATERNELLE$|
+                                                   \\sCOMPLEXE\\sSCOLAIRE$|
+                                                    \\sGROUPE\\sSCOLAIRE$|
+                                                     \\sECOLE\\sPRIMAIRE$|\\sCOLLEGE$|\\sINSTITUT TECHNIQUE PROFESSIONNEL$|\\sINSTITUT TECHNIQUE INDISTRIELLE$"), 1, 0)) %>% # ENDS WITH SCHOOL NAMES
+   dplyr::mutate(pb6  = ifelse(str_detect(NomEcole, "\\sXII\\W|\\sXII\\s|\\WXII$|
+                                                        \\sXI\\W|\\sXI\\s|\\WXI$|
+                                                         \\sX\\W|\\sX\\s|\\WX$|
+                                                          \\sIX\\W|\\sIX\\s|\\WIX$|
+                                                           \\sVIII|\\sVIII\\s|\\WVIII$|
+                                                            \\sVII\\s|\\sVII|\\WVII$|
+                                                             \\sVI\\W|\\sVI\\s|\\WVI$|
+                                                              \\sV\\W|\\sV\\s|\\WV$|
+                                                               \\sIV\\W|\\sIV\\s|\\WIV$|
+                                                                \\sIII|\\sIII\\s|\\WIII$|
+                                                                 \\sII|\\sII\\s|\\WII$|
+                                                                  \\sI\\W|\\sI\\s|\\WI$"),  1, 0)) %>% # ROMAN NUMBERS
+  dplyr::mutate(pb7 = ifelse(str_detect(NomEcole, "^\\b\\w+\\b$"), 1, 0)) %>% # SINGLE WORD NO SCHOOL TYPE INFORMATION
+  dplyr::mutate(pb8 = ifelse(str_detect(NomEcole, "[[:upper:]][[:digit:]]|[[:digit:]][[:upper:]]"), 1, 0)) %>%  # NUMBERS and WORDS W/O SPACE
+  dplyr::mutate(pb9 = ifelse(str_detect(NomEcole, " \\b[[:upper:]]{1}\\b\\s\\b[[:upper:]]{1}\\b\\s\\b[[:upper:]]{1}\\b |\\b[[:upper:]]{1}\\b\\s\\b[[:upper:]]{1}\\b\\s\\b[[:upper:]]{1}\\b |^\\b[[:upper:]]{1}\\b\\s\\b[[:upper:]]{1}\\b\\s\\b[[:upper:]]{1}\\b |\\b[[:upper:]]{1}\\b\\s\\b[[:upper:]]{1}\\b\\s\\b[[:upper:]]{1}\\b "), 1, 0)) %>% # 4 LETTER ABBR
+  dplyr::mutate(pb10 = ifelse(str_detect(NomEcole, " \\b[[:upper:]]{1}\\b\\s\\b[[:upper:]]{1}\\b\\s\\b[[:upper:]]{1}\\b |\\b[[:upper:]]{1}\\b\\s\\b[[:upper:]]{1}\\b |^\\b[[:upper:]]{1}\\b\\s\\b[[:upper:]]{1}\\b\\s\\b[[:upper:]]{1}\\b |\\b[[:upper:]]{1}\\b\\s\\b[[:upper:]]{1}\\b "), 1, 0))  %>% # 3 LETTER ABBR
+  dplyr::mutate(pb11 = ifelse(str_detect(NomEcole, " \\b[[:upper:]]{1}\\b\\s\\b[[:upper:]]{1}\\b |^\\b[[:upper:]]{1}\\b\\s\\b[[:upper:]]{1}\\b |\\b[[:upper:]]{1}\\b\\s\\b[[:upper:]]{1}\\b "), 1, 0))  %>% # 2 LETTER ABBR
+  dplyr::mutate(pb12 = ifelse(str_detect(NomEcole, " EME | ER | EME$ | ER$"), 1, 0)) %>% # NOMBRE ORDINAL
+  dplyr::mutate(pb13 = ifelse(str_detect(NomEcole, "^ST\\s|^STE\\s|\\sST\\s|\\sSTE\\s"), 1, 0)) %>% # ST AND STE ABBR
+  dplyr::mutate(pb14 = ifelse(str_detect(NomEcole, "^COLLEGE\\sCOLLEGE|^COMPLEXE\\sSCOLAIRE\\sCOMPLEXE\\sSCOLAIRE|^GROUPE\\sSCOLAIRE\\sGROUPE\\sSCOLAIRE|^ECOLE\\sMATERNELLE\\sECOLE\\sMATERNELLE|^LYCEE\\sLYCEE|^INSTITUT\\sINSTITUT"), 1, 0)) %>% # TWICE 
+  dplyr::mutate(pb15 = ifelse(str_detect(NomEcole, "^MGR | MGR "), 1, 0)) %>% #  MGR INSTEAD OF MONSEIGNEUR
+  dplyr::mutate(pb16 = ifelse(str_detect(NomEcole, "INDISTRIELLE| IEME | JIUN | SEPTAMBRE"), 1, 0)) %>% # TYPO
+  dplyr::mutate(pb17 = ifelse(str_detect(NomEcole, " EPA | REV | COLL | PROF |^ECO | ECO | OCT | TECHN | SCIENT "), 1, 0)) %>%  # ABBR
+  dplyr::mutate(pb18 = ifelse(str_detect(NomEcole, " L\\s+[AEIOU]| D\\s+[AEIOU]"), 1, 0)) %>%  # w/o apostrophe
+  dplyr::mutate(pb19 = ifelse(str_detect(NomEcole, "(0)[0-9]{1}\\s+"), 1, 0)) %>%  # integers starting w/ 0 
+  dplyr::mutate(pb20 = ifelse(str_detect(NomEcole, " [0] |\\w[0]\\w"), 1, 0)) %>%  # includes 0
+  dplyr::mutate(pb21 = ifelse(str_count(NomEcole, "LYCEE") >= 2, 1, 0)) %>% # TWICE LYCEE
+  dplyr::mutate(pb22 = ifelse(str_count(NomEcole, "ECOLE\\sPRIMAIRE") >= 2, 1, 0)) %>% # TWICE
+  dplyr::mutate(pb23 = ifelse(str_count(NomEcole, "ECOLE\\sMATERNELLE") >= 2, 1, 0)) %>% # TWICE 
+  dplyr::mutate(pb24 = ifelse(str_count(NomEcole, "INSTITUT") >= 2, 1, 0)) %>% # TWICE 
+  dplyr::mutate(pb25 = ifelse(str_count(NomEcole, "GROUPE\\sSCOLAIRE") >= 2, 1, 0)) %>% # TWICE 
+  dplyr::mutate(pb26 = ifelse(str_count(NomEcole, "COMPLEXE\\sSCOLAIRE") >= 2, 1, 0)) %>% # TWICE
+  dplyr::mutate(pb27 = ifelse(str_count(NomEcole, "COLLEGE") >= 2, 1, 0)) %>% # TWICE 
+  dplyr::mutate(multi = str_count(NomEcole, "PRIMAIRE |MATERNELLE |COMPLEXE |GROUPE |INSTITUT |COLLEGE |LYCEE | INSTITUT$|^COLLEGE |^LYCEE "))  %>% # CONTAINING DIFFERENT SCHOOLS
+  dplyr::mutate(digits = str_count(NomEcole, "[0-9]"))  %>% # CONTAINING DIGITS
+  dplyr::mutate(code = ifelse(str_detect(NomEcole, "CODE| KM | KILOMETRE |JUIN|JUILLET|AVRIL| EME |EME | IEME | ER |ER | EME$| ER$| MAI$| MAI | OCTOBRE | NOVEMBRE|NUM | MARS | MARS| SEPTEMBRE| SEPTEMBRE| JANVIER| OCTOBRE| DECEMBRE| 816891965| 3133263| 6 350684| 9165775| 131613| 316| 400| 8 32| 2 06| AV MAWANGA | NYOTA 11| MARC 16| 11 MAENDELEO| MAKALA 13| MAKALA 11| MAKALA 14| 11 KINGASANI| NGIRI 11| 11 SELEMBAO| CBC 0| 33 E | MATHIEU 7 7| 50| 37 E | 28 CMUCC| 84 WANZE WANZE| SAN 53| SAN 68| 2 9| UPENDO 50| WANZE 15| 17 MAKALA| L'EGLISE | KIBANGU 49| KABONGO 18| LEMBA | ARCHEVEQUE| 11 KISENSO| NGIRI 13| WANZEWANZE| WANZE WANZE| 34 E| 55 CBCE| 49 E| 13 E| 83 SAN| BENOIT 16| SANK 68| MUTSHEMBE 83| NAGABA 11| TSHISHINJI| TSHITONKONYI | 13 CBFC| BOZAGBA 25| NGABA 11"), 1, 0)) %>%  # CODE
+  dplyr::mutate(dup = ifelse(digits >=2 & code != 1 | multi>=2 & code != 1, 1, 0))  %>% # DUP DUMMY FOR DUPLICATES
+  mutate(tot_pb = select(., pb1a:pb27) %>% rowSums(na.rm = TRUE)) 
+
+yes_pb <- allschools %>%
+  dplyr::filter(tot_pb!=0) %>% dplyr::filter(pb7!=1) # 
+
+```
+
+
+Fix errors
+```{r}
+allschools <- allschools %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("\\w.M$|\\sB.\\s|\\sB.$", " ", .))) %>%  # PUNCTUATION
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^THE0 ", "THEO ", .))) %>%  # typo
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("[^[:alnum:][:space:]']", " ", .))) %>%  # PUNCTUATION
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("\"|\'\'", "\'", .))) %>%  # PUNCTUATION
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^BWAN' ", "BWAN ", .))) %>%  # PUNCTUATION
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(\\w)\\s(\')|(\')\\s(\\w)", "\\1\\2", .))) %>%  # PUNCTUATION
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("\"|\'\'", "\'", .))) %>%  # PUNCTUATION
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^\''", "", .))) %>%  # PUNCTUATION STARTS WITH '
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("M1W1MBA ", "MIWIMBA ", .))) %>% #typo
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("M0NG0T0 ", "MONGOTO ", .))) %>% #typo
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("EP2KOV0 ", "EP 2 KOVO ", .))) %>%  # typo
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" K1LINGI ", " KILINGI ", .))) %>%  # typo
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" SCLOLAIRE ", " SCOLAIRE ", .))) %>%  # typo
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" 0MEGA", " OMEGA", .))) %>%  # typo
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("E OLE", "ECOLE", .))) %>%  # typo
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("ECOLLE ", "ECOLE ", .))) %>%  # typo
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^INSTITUT DU COMPLEXE  SCOLAIRES ", "INSTITUT COMPLEXE SCOLAIRE ", .))) %>%  # typo
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" SCOLAIRES | SCALAIRE | SCOLAIR ", " SCOLAIRE ", .))) %>%  # MANUAL TYPO EDIT
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" AU COLLEGE ", " COLLEGE ", .))) %>%  # MANUAL TYPO EDIT
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("I STITUT ", "INSTITUT ", .))) %>%  # MANUAL TYPO EDIT
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" DU LYCEE |DU LYCEE ", " LYCEE ", .))) %>%  # MANUAL TYPO EDIT
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" LISALA EP", " LISALA ", .))) %>%  # MANUAL TYPO EDIT
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" LODJA EP", " LODJA ", .))) %>%  # MANUAL TYPO EDIT
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" ASSOSSA EP", " ASSOSSA ", .))) %>%  # MANUAL TYPO EDIT
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" ET PRIMAIRE ", " ECOLE PRIMAIRE ", .))) %>%  # manual
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" ET MATERNELLE ", " ECOLE MATERNELLE ", .))) %>%  # manual
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" GROUPE DE ", " GROUPE SCOLAIRE DE ", .))) %>%  # manual
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^COMPLEXE  LES ANGES ", "COMPLEXE SCOLAIRE LES ANGES ", .))) %>%  # manual
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^COMPLEXE KIONGOZI ", "COMPLEXE SCOLAIRE KIONGOZI ", .))) %>%  # manual
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" KINGASANI EP 6", " KINGASANI 6", .))) %>%  # manual
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" EP A", " ", .))) %>%  # manual
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" ITAV INSTITUT", " ITAV", .))) %>%  # manual
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^L'INSTITUT ", "INSTITUT ", .))) %>%  # manual
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" AU LYCEE ", " LYCEE ", .))) %>%  # manual
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^DU GROUPE SCOLAIRE ", "GROUPE SCOLAIRE ", .))) %>%  # manual
+   dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^GROUPE DE LA PAIX ", "GROUPE SCOLAIRE DE LA PAIX ", .))) %>%  # manual
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~                                          gsub("\\s\\b([[:upper:]]){1}\\b\\s\\b([[:upper:]]){1}\\b\\s\\b([[:upper:]]){1}\\b\\s\\b([[:upper:]]){1}$", "\\1\\2\\3\\4 ", .))) %>% # 4 LETTER ABBR AT THE END
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^\\b([[:upper:]]){1}\\b\\s\\b([[:upper:]]){1}\\b\\s\\b([[:upper:]]){1}\\b\\s\\b([[:upper:]]){1}\\b", "\\1\\2\\3\\4 ", .))) %>% # 4 LETTER ABBR IN THE BEGINNING
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" \\b([[:upper:]]){1}\\b\\s\\b([[:upper:]]){1}\\b\\s\\b([[:upper:]]){1}\\b\\s\\b([[:upper:]]){1}\\b ", "\\1\\2\\3\\4 ", .))) %>% # 4 LETTER ABBR IN THE MIDDLE
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("\\s\\b([[:upper:]]){1}\\b\\s\\b([[:upper:]]){1}\\b\\s\\b([[:upper:]]){1}$", "\\1\\2\\3 ", .))) %>% # 3 LETTER ABBR AT THE END
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^\\b([[:upper:]]){1}\\b\\s\\b([[:upper:]]){1}\\b\\s\\b([[:upper:]]){1}\\b", "\\1\\2\\3 ", .))) %>% # 3 LETTER ABBR BEGINNING
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" \\b([[:upper:]]){1}\\b\\s\\b([[:upper:]]){1}\\b\\s\\b([[:upper:]]){1}\\b ", " \\1\\2\\3 ", .))) %>% # 3 LETTER ABBR IN THE MIDDLE
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("\\s\\b([[:upper:]]){1}\\b\\s\\b([[:upper:]]){1}$", "\\1\\2 ", .))) %>% # 2 LETTER ABBR BEGINNING
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^\\b([[:upper:]]){1}\\b\\s\\b([[:upper:]]){1}\\b", "\\1\\2 ", .))) %>% # 2 LETTER ABBR BEGINNING
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" \\b([[:upper:]]){1}\\b\\s\\b([[:upper:]]){1}\\b ", " \\1\\2\\3 ", .))) %>% # 2 LETTER ABBR IN THE MIDDLE
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" IT C ", " ITC ", .))) %>% # IT C ABBR
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("([A-Z])([0])([A-Z])", "\\1O\\3", .))) %>%  # ZERO INSTEAD OF O
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(\\d)([A-Z])", "\\1 \\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("([A-Z])(\\d)", "\\1 \\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" (L)\\s+([AEIOU])| (D)\\s+([AEIOU])|^(L)\\s+([AEIOU])|^(D)\\s+([AEIOU])", " \\1\'\\2 ", .))) %>% # w/o apostrophe
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" ([0])([0-9]) |^([0])([0-9]) ", " \\2 ", .))) %>% #01...09
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("([0-9])\\s+(E)\\s+(*.) ", " \\1EME \\3", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" AVRILE", " AVRIL", .))) %>%  # TYPO
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" JIUN ", " JUIN ", .))) %>%  # TYPO
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" SEPTAMBRE", " SEPTEMBRE", .))) %>%  # TYPO
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" KAL0NDA ", " KALONDA ", .))) %>% #typo
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("\\s\\s", " ", .))) %>% # DOUBLE SPACE
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^\\s|\\s$", "", .))) %>% # SINGLE SPACE BEGINNING OR END
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" IEME ", " EME ", .))) %>% # TYPO
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("([0-9])\\s+(EME)|^([0-9])\\s+(EME)|([0-9])\\s+(ER)|^([0-9])\\s+(ER)" , "\\1\\2", .))) # trim the space between ordinary numbers
+  #dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(.*)(\\s+)(ER)" , "\\1\\3", .))) %>% # trim the space between ordinary numbers
+ 
+  allschools <- allschools %>% dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^E\\sM\\s|\\sE\\sM\\s|^EMA\\s", "EM ", .))) %>% 
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^E\\sP\\s|\\sE\\sP\\s|E'P ", "EP ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^C\\sS\\s|\\sC\\sS\\s", "CS ", .))) %>% 
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^G\\sS\\s|\\sG\\sS\\s", "GS ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^IPROF\\s", "IPRO ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^IPROMA\\s", "IPRO MAPANGU", .))) %>% ##?
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^ST\\s|\\sST\\s", " SAINT ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^STE\\s|\\sSTE\\s", " SAINTE ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" SCIENT ", " SCIENTFIQUE ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" TECHN ", " TECHNIQUE ", .))) %>%
+     dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("\\s\\s", " ", .))) %>% # DOUBLE SPACE
+     dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^\\s|\\s$", "", .))) %>% # SINGLE SPACE BEGINNING OR END
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^(EM)\\s+(*.)(.*)(ECOLE MATERNELLE)", "\\1 \\2\\3", .))) %>% 
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^(EP)\\s+(*.)(.*)(ECOLE PRIMAIRE)", "\\1 \\2\\3", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^(GS)\\s+(*.)(.*)(GROUPE SCOLAIRE)", "\\1 \\2\\3", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^(CS)\\s+(*.)(.*)(COMPLEXE SCOLAIRE)", "\\1 \\2\\3", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^(IPRO)\\s+(*.)(.*)(INSTITUT)", "\\1 \\2\\3", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^(ITA)\\s+(*.)(.*)(INSTITUT)", "\\1 \\2\\3", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^(ITI)\\s+(*.)(.*)(INSTITUT TECHNIQUE INDUSTRIEL)", "\\1 \\2\\3", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("INDISTRIELLE", "INDUSTRIEL", .))) %>% #typo
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" COLL ", " COLLEGE ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" REV |^REV ", " REVEREND ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" EPA |^EPA", " ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^ECO | ECO ", " ECOLE ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^MGR | MGR ", " MONSIEUR ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" OCT ", " OCTOBRE ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^EM\\s|^E\\sM\\s|^E MAT | EM | E M " , " ECOLE MATERNELLE ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^EP\\s|^E\\sP\\s|\\sEP\\s|\\sE\\sP\\s|^E P | EP " , " ECOLE PRIMAIRE ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^CS\\s|^C\\sS\\s| CS " , " COMPLEXE SCOLAIRE ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^GS\\s|^G\\sS\\s| GS " , " GROUPE SCOLAIRE ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^COMPLEXE VIE SACREE " , "VIE SACREE ", .))) %>% #manual
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^MATERNELLE LUANDA " , "LUANDA ", .))) %>% #manual
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" MAIS " , " MAI ", .))) %>% #manual
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^(ITAV)(*.)(.*)(INSTITUT)(*.)" , "\\1 \\2 \\3 ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^(INST)(*.)(.*)(INSTITUT)(*.)" , "\\2 \\3 \\4 \\5 ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^INST\\s+|\\s+INST\\s+" , "INSTITUT ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^ITA PROF" , "INSTITUT TECHNIQUE AGRICOLE PROFESSIONNEL", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" ITAV " , " INSTITUT TECHNIQUE AGRICOLE VETERINAIRE ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" ITAV$" , " INSTITUT TECHNIQUE AGRICOLE VETERINAIRE ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^ITA\\s", "INSTITUT TECHNIQUE AGRICOLE ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^ITI\\s", "INSTITUT TECHNIQUE INDUSTRIEL ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^IPRO\\s", "INSTITUT PROFESSIONNEL ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^PROF | PROF ", " PROFESSIONNEL ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" PROFESSIONNELLE", " PROFESSIONNEL", .))) %>%
+      dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("\\s\\s", " ", .))) %>% # DOUBLE SPACE
+      dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^\\s|\\s$", "", .))) %>%  # SINGLE SPACE BEGINNING OR END
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^(ECOLE MATERNELLE)\\s+(*.)(.*)(ECOLE MATERNELLE)(*.)", " \\1 \\2\\3\\4 ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^(ECOLE MATERNELLE)\\s(ECOLE MATERNELLE)(*.)", "\\2 \\3", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^(ECOLE MATERNELLE)\\s+(*.)(.*)(ECOLE MATERNELLE)$", "\\1 \\2\\3", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(.*)(ECOLE MATERNELLE)\\s+(*.)(.*)(ECOLE MATERNELLE)$", "\\1\\2\\3\\4", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^(COLLEGE)\\s+(COLLEGE)(*.)", "\\2 \\3 ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^(COLLEGE)\\s+(COLLEGE)$", "\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(.*)(COLLEGE)\\s+(COLLEGE)$", "\\1 \\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^(COMPLEXE SCOLAIRE)\\s+(COMPLEXE SCOLAIRE)(*.)", "\\2 \\3", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^(COMPLEXE SCOLAIRE)\\s+(COMPLEXE SCOLAIRE)$", "\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(.*)(COMPLEXE SCOLAIRE)\\s+(COMPLEXE SCOLAIRE)$", "\\1 \\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(.*)(COMPLEXE SCOLAIRE)\\s+(*.)(.*)(COMPLEXE SCOLAIRE)$", "\\1\\2\\3\\4", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^(GROUPE SCOLAIRE)\\s+(GROUPE SCOLAIRE)(*.)", "\\2 \\3", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^(GROUPE SCOLAIRE)\\s+(GROUPE SCOLAIRE)$", "\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(.*)(GROUPE SCOLAIRE)\\s+(GROUPE SCOLAIRE)$", "\\1 \\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(.*)(GROUPE SCOLAIRE)\\s+(*.)(.*)(GROUPE SCOLAIRE)$", "\\1\\2\\3\\4", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^(ECOLE PRIMAIRE)\\s+(ECOLE PRIMAIRE)(*.)", "\\2 \\3", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^(ECOLE PRIMAIRE)\\s+(ECOLE PRIMAIRE)$", "\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(.*)(ECOLE PRIMAIRE)\\s+(ECOLE PRIMAIRE)$", "\\1 \\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^(ECOLE PRIMAIRE)\\s+(*.)(.*)(ECOLE PRIMAIRE)$", "\\1 \\2\\3", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(.*)(ECOLE PRIMAIRE)\\s+(*.)(.*)(ECOLE PRIMAIRE)$", "\\1\\2\\3\\4", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^(LYCEE)\\s+(LYCEE)(*.)", "\\2 \\3", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^(LYCEE)\\s+(LYCEE)$", "\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(.*)(LYCEE)\\s+(LYCEE)$", "\\1 \\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(.*)\\s+(INSTITUT SCIENTIFIQUE)$", "\\2 \\1", .))) %>% # END PUT TO FIRST
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(.*)\\s+(INSTITUT PEDAGOGIQUE)$", "\\2 \\1", .))) %>% # END PUT TO FIRST
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(.*)\\s+(INSTITUT TECHNIQUE AGRICOLE)$", "\\2 \\1", .))) %>% # END PUT TO FIRST
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(.*)\\s+(INSTITUT TECHNIQUE INDUSTRIELLE)$", "\\2 \\1", .))) %>% # END PUT TO FIRST
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(.*)\\s+(INSTITUT TECHNIQUE PROFESSIONNEL)$", "\\2 \\1", .))) %>% # END PUT TO FIRST
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(.*)\\s+(INSTITUT TECHNIQUE)$", "\\2 \\1", .))) %>% # END PUT TO FIRST
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^(INSTITUT)\\s+(INSTITUT)(*.)", "\\2 \\3", .))) %>% # TRIM DOUBLES
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^(INSTITUT)\\s+(INSTITUT)$", "\\2", .))) %>% # TRIM DOUBLES
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(.*)(INSTITUT)\\s+(INSTITUT)$", "\\1 \\2", .))) %>% # TRIM DOUBLES
+      dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("\\s\\s", " ", .))) %>% # DOUBLE SPACE
+      dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^\\s|\\s$", "", .))) %>%  # SINGLE SPACE BEGINNING OR END
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(.*)\\s+(ECOLE MATERNELLE)$", " \\2 \\1 ", .))) %>%  # END PUT TO FIRST
+      dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("\\s\\s", " ", .))) %>% # DOUBLE SPACE
+      dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^\\s|\\s$", "", .))) %>%  # SINGLE SPACE BEGINNING OR END
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(.*)\\s+(COLLEGE)$", " \\2 \\1 ", .))) %>% # END PUT TO FIRST
+      dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("\\s\\s", " ", .))) %>% # DOUBLE SPACE
+      dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^\\s|\\s$", "", .))) %>%  # SINGLE SPACE BEGINNING OR END
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(.*)\\s+(ECOLE PRIMAIRE)$", " \\2 \\1 ", .))) %>% # END PUT TO FIRST
+      dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("\\s\\s", " ", .))) %>% # DOUBLE SPACE
+      dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^\\s|\\s$", "", .))) %>%  # SINGLE SPACE BEGINNING OR END
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(.*)\\s+(GROUPE SCOLAIRE)$", " \\2 \\1 ", .))) %>% # END PUT TO FIRST
+      dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("\\s\\s", " ", .))) %>% # DOUBLE SPACE
+      dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^\\s|\\s$", "", .))) %>%  # SINGLE SPACE BEGINNING OR END
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(.*)\\s+(COMPLEXE SCOLAIRE)$", " \\2 \\1 ", .))) %>% # END PUT TO FIRST
+      dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("\\s\\s", " ", .))) %>% # DOUBLE SPACE
+      dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^\\s|\\s$", "", .))) %>%  # SINGLE SPACE BEGINNING OR END
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(.*)\\s+(INSTITUT)$", " \\2 \\1 ", .))) %>% #END PUT TO FIRST
+      dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("\\s\\s", " ", .))) %>% # DOUBLE SPACE
+      dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^\\s|\\s$", "", .))) %>%  # SINGLE SPACE BEGINNING OR END
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(.*)\\s+(COLLEGE)$", " \\2 \\1 ", .))) %>% # one more time you need to put this
+      dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("\\s\\s", " ", .))) %>% # DOUBLE SPACE
+      dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^\\s|\\s$", "", .))) %>%  # SINGLE SPACE BEGINNING OR END
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(.*)\\s+(LYCEE)$", " \\2 \\1 ", .))) %>% 
+      dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("\\s\\s", " ", .))) %>% # DOUBLE SPACE
+      dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^\\s|\\s$", "", .))) %>%  # SINGLE SPACE BEGINNING OR END
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^(LYCEE)\\s+(LYCEE)(*.)", "\\2 \\3", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(.*)\\s+(INSTITUT SCIENTIFIQUE)$", " \\2 \\1 ", .))) %>% # END PUT TO FIRST RERUN
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(.*)\\s+(INSTITUT PEDAGOGIQUE)$", " \\2 \\1 ", .))) %>% # END PUT TO FIRST RERUN
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(.*)\\s+(INSTITUT TECHNIQUE INDUSTRIEL)$", " \\2 \\1 ", .))) %>% # END PUT TO FIRST RERUN
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(.*)\\s+(INSTITUT TECHNIQUE AGRICOLE)$", " \\2 \\1 ", .))) %>% # END PUT TO FIRST RERUN
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(.*)\\s+(INSTITUT TECHNIQUE AGRICOLE VETERINAIRE)$", " \\2 \\1 ", .))) %>% # END PUT TO FIRST RERUN
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(.*)\\s+(INSTITUT TECHNIQUE)$", " \\2 \\1 ", .))) %>% # END PUT TO FIRST RERUN
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^(INSTITUT)\\s+(INSTITUT)(*.)", "\\2 \\3", .))) %>% # TRIM DOUBLES
+      dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("\\s\\s", " ", .))) %>% # DOUBLE SPACE
+      dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^\\s|\\s$", "", .))) %>%  # SINGLE SPACE BEGINNING OR END
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" SCIENTIFIQUE INSTITUT$", " SCIENTIFIQUE", .))) %>% # 
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" TECHNIQUE AGRICOLE INSTITUT$", " TECHNIQUE AGRICOLE", .))) %>% # 
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^(COLLEGE)\\s+(COLLEGE)(*.)", "\\2 \\3 ", .))) %>%
+      dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("\\s\\s", " ", .))) %>% # DOUBLE SPACE
+      dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^\\s|\\s$", "", .))) %>%  # SINGLE SPACE BEGINNING OR END
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("\\s+I\\s+", " 1 ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" BENNG'I", " BENNGI", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^(INSTITUT)([A-Z])", "\\1 \\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^(LYCEE)([A-Z])", "\\1 \\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^(COLLEGE)([A-Z])", "\\1 \\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("ECOLE MATERNELLE MATERNELLE", "ECOLE MATERNELLE", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" AGRICOLE INSTITUT", " AGRICOLE", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("\\sXI\\sI" , " XII ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" XII\\W|\\WXII$| XII " , " 12 ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("\\sX\\sI" , " XI ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" XI\\W|\\WXI$| XI " , " 11 ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" X\\W|\\WX$| X |^X " , " 10 ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("\\sI\\sX" , " IX ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" IX\\W|\\WIX$| IX " , " 9 ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("\\sVII\\sI" , " VIII ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" VIII|\\WVIII$| VIII " , " 8 ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("\\sVI\\sI" , " VII ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" VII|\\WVII$| VII " , " 7 ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" VI\\s|\\sVI$| VI " , " 6 ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" V\\W|\\WV$| V " , " 5 ", . ))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" IV\\W|\\WIV$| IV " , " 4 ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" III|\\WIII$| III " , " 3 ", . ))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" I I |I I$" , " II ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" II|\\WII$| II |^II " , " 2 ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("\\sI\\s|\\sI\\W|^I\\W| I | I$" , " 1 ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(\\d)([A-Z])", "\\1 \\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("([A-Z])(\\d)", "\\1 \\2", .))) %>%
+   dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^1 TUT ", " ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("Ã…â€™|Å’", "OE", .))) %>%  # SPECIAL CH
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("Ã‡", "C", .))) %>%  # SPECIAL CH
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("Ã”", "O", .))) %>%  # SPECIAL CH
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("Ã›", "U", .))) %>%  # SPECIAL CH
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" C SC ", "", .))) %>%  # DELETE C SC
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^COMPLEXE SCOLAIRE COMPLEXE ", "COMPLEXE SCOLAIRE ", .))) %>%  # 
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" 2 DIPONGA 2", " DIPONGA 2", .))) %>%  # manual
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" 2 NTA 2", " NTA 2", .))) %>%  # manual
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" 2 ONZELE 2", " ONZELE 2", .))) %>%  # manual
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" 3 KINSUKA 3", " KINSUKA 3", .))) %>%  # manual
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" 2 SADISANA 2", " SADISANA 2", .))) %>%  # manual
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" COMPLEXE LE PETIT ", " COMPLEXE SCOLAIRE LE PETIT ", .))) %>%  # manual
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" COMPLEXE PAPA ", " COMPLEXE SCOLAIRE PAPA ", .))) %>%  # manual
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^DU\\s+| DU | DE " , " ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" EDAP PRIMAIRE ISP" , " ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^P S " , " ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" KATENDE AUCUNE$" , " ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("MBAYANGANGNSTITUT" , "INSTITUT MBAYANGANG", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("INSTITUTLODJA" , "INSTITUT LODJA", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^(INSTITUT TECHNIQUE INDUSTRIEL)\\s+(INSTITUT TECHNIQUE INDUSTRIEL)(*.)", "\\2 \\3", .))) %>% # TRIM DOUBLES
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^(INSTITUT TECHNIQUE AGRICOLE ET VETERINAIRE)\\s+(INSTITUT TECHNIQUE AGRICOLE VETERINAIRE)(*.)", "\\2 \\3", .))) %>% # TRIM DOUBLES
+      dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("\\s\\s", " ", .))) %>% # DOUBLE SPACE
+      dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^\\s|\\s$", "", .)))  # SINGLE SPACE BEGINNING OR END
+
+```
+
+
+Expand the school names ## did not finish all come back later
+```{r}
+allschools.expanded <- allschools[rep(row.names(allschools), ifelse(allschools$dup==1, 2, 1)), ]  %>% filter(dup == 1) %>%
+                    dplyr::group_by(school_id) %>%  dplyr::mutate(ind = row_number())   %>% filter(!str_detect(NomEcole, '67|20|21|22|23|24|56|12|10'))
+
+allschools.expanded <- allschools.expanded %>%
+     dplyr::mutate(count_multi = str_count(NomEcole, " PRIMAIRE |INSTITUT|COMPLEXE|GROUPE| COLLEGE | LYCEE |COLLEGE |LYCEE |MATERNELLE | MATERNELLE ")) %>% 
+     arrange((count_multi)) %>%
+     dplyr::mutate(digits_exp = str_count(NomEcole, "[0-9]"))  %>% # CONTAINING DIGITS
+     dplyr::mutate(dup_exp = ifelse(digits_exp <=4 & count_multi >=2, 1, 0)) %>%
+     dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" DU COLLEGE ", " COLLEGE ", .))) %>%
+     dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" DU COMPLEXE SCOLAIRE ", " COMPLEXE SCOLAIRE ", .))) %>%
+     dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" SCOLAIRE MATERNELLE ", " SCOLAIRE ECOLE MATERNELLE ", .))) %>%
+     dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" COMPLEXE MUBEMBA", " COMPLEXE SCOLAIRE MUBEMBA", .))) %>%
+     dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" MATERNEL$| MATERMELE$", " ", .))) %>%
+     dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" CSCM MATERNELLE ", " CSCM ECOLE MATERNELLE ", .))) %>%
+     dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" MATERNELLE KAMABANGA", " KAMABANGA", .))) %>%
+     dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" GROUPE CIEL", " GROUPE SCOLAIRE CIEL", .))) %>%
+     dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" ECOLE PRIMAIRE MASLNA| ECOLE PRIMAIRE MASINA", " MASINA", .)))  %>%
+     dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" ECOLE PRIMAIRE SAINT PIERRE$", " SAINT PIERRE", .))) %>%
+     dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" DJILI ECOLE PRIMAIRE ", " DJILI ", .))) %>%
+     dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" PRIMAIRE PANZI", " ECOLE PRIMAIRE PANZI", .))) %>%
+     dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^INSTITUT TECHNIQUE AGRICOLE ET VETERINAIRE INSTITUT TECHNIQUE AGRICOLE VETERINAIRE", "INSTITUT TECHNIQUE AGRICOLE VETERINAIRE", .))) %>%
+     dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub(" GROUPE SCOLAIRE DE RELANCE ", " GROUPE DE RELANCE ", .)))
+  
+
+### 1 ### 
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("(.*)([0-9])\\s+(ET)\\s+([0-9])$","\\1 \\2", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("(.*)([0-9])\\s+(ET)\\s+([0-9])$","\\1 \\4", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### 2 ### #ECOLE PRIMAIRE - ECOLE MATERNELLE#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(ECOLE PRIMAIRE)\\s+(ECOLE MATERNELLE)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(ECOLE PRIMAIRE)\\s+(ECOLE MATERNELLE)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### 3 ### #ECOLE MATERNELLE - ECOLE PRIMAIRE#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(ECOLE MATERNELLE)\\s+(ECOLE PRIMAIRE)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(ECOLE MATERNELLE)\\s+(ECOLE PRIMAIRE)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### 4 ### #ECOLE MATERNELLE - COMPLEXE SCOLAIRE#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(ECOLE MATERNELLE)\\s+(COMPLEXE SCOLAIRE)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(ECOLE MATERNELLE)\\s+(COMPLEXE SCOLAIRE)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### 5 ### #COMPLEXE SCOLAIRE - ECOLE MATERNELLE#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(COMPLEXE SCOLAIRE)\\s+(ECOLE MATERNELLE)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(COMPLEXE SCOLAIRE)\\s+(ECOLE MATERNELLE)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### 6 ### #ECOLE MATERNELLE - COLLEGE#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(ECOLE MATERNELLE)\\s+(COLLEGE)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(ECOLE MATERNELLE)\\s+(COLLEGE)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### 7 ### #ECOLE MATERNELLE - GROUPE SCOLAIRE#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(ECOLE MATERNELLE)\\s+(GROUPE SCOLAIRE)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(ECOLE MATERNELLE)\\s+(GROUPE SCOLAIRE)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### 8 ### #ECOLE MATERNELLE - LYCEE #
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(ECOLE MATERNELLE)\\s+(LYCEE)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(ECOLE MATERNELLE)\\s+(LYCEE)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+
+### 9 ### #COLLEGE - ECOLE MATERNELLE#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(COLLEGE)\\s+(ECOLE MATERNELLE)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(COLLEGE)\\s+(ECOLE MATERNELLE)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### 10 ### #COMPLEXE SCOLAIRE - ECOLE PRIMAIRE#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(COMPLEXE SCOLAIRE)\\s+(ECOLE PRIMAIRE)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(COMPLEXE SCOLAIRE)\\s+(ECOLE PRIMAIRE)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### 11 ### #COMPLEXE SCOLAIRE - INSTITUT TECHNIQUE AGRICOLE#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(COMPLEXE SCOLAIRE)\\s+(INSTITUT TECHNIQUE AGRICOLE)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(COMPLEXE SCOLAIRE)\\s+(INSTITUT TECHNIQUE AGRICOLE)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+
+### 12 ### #COMPLEXE SCOLAIRE - INSTITUT TECHNIQUE PROFESSIONNEL#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(COMPLEXE SCOLAIRE)\\s+(INSTITUT TECHNIQUE PROFESSIONNEL)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(COMPLEXE SCOLAIRE)\\s+(INSTITUT TECHNIQUE PROFESSIONNEL)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+
+### 13 ### #COMPLEXE SCOLAIRE - INSTITUT#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(COMPLEXE SCOLAIRE)\\s+(INSTITUT)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(COMPLEXE SCOLAIRE)\\s+(INSTITUT)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### 14 ### #COMPLEXE SCOLAIRE - LYCEE#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(COMPLEXE SCOLAIRE)\\s+(LYCEE)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(COMPLEXE SCOLAIRE)\\s+(LYCEE)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### 15 ### #GROUPE SCOLAIRE - ECOLE MATERNELLE#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(GROUPE SCOLAIRE)\\s+(ECOLE MATERNELLE)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(GROUPE SCOLAIRE)\\s+(ECOLE MATERNELLE)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### 16 ### #ECOLE PRIMAIRE - COLLEGE#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(ECOLE PRIMAIRE)\\s+(COLLEGE)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(ECOLE PRIMAIRE)\\s+(COLLEGE)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### 17 ### #ECOLE PRIMAIRE - COMPLEXE SCOLAIRE#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(ECOLE PRIMAIRE)\\s+(COMPLEXE SCOLAIRE)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(ECOLE PRIMAIRE)\\s+(COMPLEXE SCOLAIRE)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### 18 ### #ECOLE PRIMAIRE - LYCEE#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(ECOLE PRIMAIRE)\\s+(LYCEE)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(ECOLE PRIMAIRE)\\s+(LYCEE)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### 19 ### #COMPLEXE SCOLAIRE - COLLEGE#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(COMPLEXE SCOLAIRE)\\s+(COLLEGE)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(COMPLEXE SCOLAIRE)\\s+(COLLEGE)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### 20 ### #ECOLE PRIMAIRE - INSTITUT SUPERIEUR#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(ECOLE PRIMAIRE)\\s+(INSTITUT SUPERIEUR)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(ECOLE PRIMAIRE)\\s+(INSTITUT SUPERIEUR)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### 21 ### #ECOLE PRIMAIRE - INSTITUT#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(ECOLE PRIMAIRE)\\s+(INSTITUT)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(ECOLE PRIMAIRE)\\s+(INSTITUT)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### 22 ### #ECOLE PRIMAIRE - GROUPE SCOLAIRE#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(ECOLE PRIMAIRE)\\s+(GROUPE SCOLAIRE)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(ECOLE PRIMAIRE)\\s+(GROUPE SCOLAIRE)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### 23 ### #COMPLEXE SCOLAIRE - INSTITUT SUPERIEUR#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(COMPLEXE SCOLAIRE)\\s+(INSTITUT SUPERIEUR)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(COMPLEXE SCOLAIRE)\\s+(INSTITUT SUPERIEUR)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+
+### 24 ### #COMPLEXE SCOLAIRE - GROUPE SCOLAIRE#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(COMPLEXE SCOLAIRE)\\s+(GROUPE SCOLAIRE)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(COMPLEXE SCOLAIRE)\\s+(GROUPE SCOLAIRE)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### 25 ### #LYCEE - GROUPE SCOLAIRE#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(LYCEE)\\s+(GROUPE SCOLAIRE)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(LYCEE)\\s+(GROUPE SCOLAIRE)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+
+### 26 ### #GROUPE SCOLAIRE - COMPLEXE SCOLAIRE#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(GROUPE SCOLAIRE)\\s+(COMPLEXE SCOLAIRE)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(GROUPE SCOLAIRE)\\s+(COMPLEXE SCOLAIRE)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+
+### 27 ### #INSTITUT - ECOLE PRIMAIRE#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(INSTITUT)\\s+(ECOLE PRIMAIRE)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(INSTITUT)\\s+(ECOLE PRIMAIRE)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### 28 ### #COLLEGE- ECOLE PRIMAIRE#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(COLLEGE)\\s+(ECOLE PRIMAIRE)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(COLLEGE)\\s+(ECOLE PRIMAIRE)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### 29 ### #COLLEGE- COMPLEXE SCOLAIRE#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(COLLEGE)\\s+(COMPLEXE SCOLAIRE)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(COLLEGE)\\s+(COMPLEXE SCOLAIRE)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### 30 ### #INSTITUT - COLLEGE#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(INSTITUT)\\s+(COLLEGE)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(INSTITUT)\\s+(COLLEGE)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### 31 ### #GROUPE SCOLAIRE - ECOLE PRIMAIRE#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(GROUPE SCOLAIRE)\\s+(ECOLE PRIMAIRE)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(GROUPE SCOLAIRE)\\s+(ECOLE PRIMAIRE)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### 32 ### #INSTITUT PEDAGOGIQUE - COLLEGE#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(INSTITUT PEDAGOGIQUE)\\s+(COLLEGE)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(INSTITUT PEDAGOGIQUE)\\s+(COLLEGE)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### 33 ### #INSTITUT - COMPLEXE SCOLAIRE#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(INSTITUT)\\s+(COMPLEXE SCOLAIRE)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(INSTITUT)\\s+(COMPLEXE SCOLAIRE)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+
+### 34 ### #INSTITUT PEDAGOGIQUE - LYCEE#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(INSTITUT PEDAGOGIQUE)\\s+(LYCEE)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(INSTITUT PEDAGOGIQUE)\\s+(LYCEE)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### 35 ### #INSTITUT TECHNIQUE - LYCEE#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(INSTITUT TECHNIQUE)\\s+(LYCEE)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(INSTITUT TECHNIQUE)\\s+(LYCEE)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### 36 ### #INSTITUT - LYCEE#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(INSTITUT)\\s+(LYCEE)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(INSTITUT)\\s+(LYCEE)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+###  ### #INSTITUT SCIENTIFIQUE - LYCEE#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(INSTITUT SCIENTIFIQUE)\\s+(LYCEE)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(INSTITUT SCIENTIFIQUE)\\s+(LYCEE)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+###  ### #INSTITUT TECHNIQUE AGRICOLE - LYCEE#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(INSTITUT TECHNIQUE AGRICOLE)\\s+(LYCEE)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(INSTITUT TECHNIQUE AGRICOLE)\\s+(LYCEE)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+###  ### #LYCEE- INSTITUT INDUSTRIEL#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(LYCEE)\\s+(INSTITUT TECHNIQUE INDUSTRIEL)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(LYCEE)\\s+(INSTITUT TECHNIQUE INDUSTRIEL)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+
+### 37 ### #INSTITUT - GROUPE SCOLAIRE#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(INSTITUT)\\s+(GROUPE SCOLAIRE)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(INSTITUT)\\s+(GROUPE SCOLAIRE)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+
+### 38 ### #LYCEE - ECOLE PRIMAIRE#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(LYCEE)\\s+(ECOLE PRIMAIRE)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(LYCEE)\\s+(ECOLE PRIMAIRE)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### 39 ### #LYCEE - COMPLEXE SCOLAIRE#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(LYCEE)\\s+(COMPLEXE SCOLAIRE)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(LYCEE)\\s+(COMPLEXE SCOLAIRE)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### 40 ### #COLLEGE - INSTITUT#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(COLLEGE)\\s+(INSTITUT)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(COLLEGE)\\s+(INSTITUT)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### 41 ### #GROUPE SCOLAIRE - INSTITUT#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(GROUPE SCOLAIRE)\\s+(INSTITUT)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(GROUPE SCOLAIRE)\\s+(INSTITUT)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### 42 ### #ECOLE PRIMAIRE - COMPLEXE SCOLAIRE#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(ECOLE PRIMAIRE)\\s+(COMPLEXE SCOLAIRE)(*.)","\\1 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(ECOLE PRIMAIRE)\\s+(COMPLEXE SCOLAIRE)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### 43 ### #2 NIA NIA CECA 16#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("(.*)\\s+(2 NIA NIA CECA)\\s+(*.){2,}","\\1 \\2", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("(.*)\\s+(2)\\s+(NIA NIA CECA)(*.)","\\1 \\3 \\4", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+ 
+
+### 44  ### #CHAMPIONS 1#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("(.*)\\s+(CHAMPIONS 1)\\s+(*.){1,}","\\1 \\2", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("(.*)\\s+(CHAMPIONS)\\s+(1)(*.)","\\1 \\2 \\4", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+
+### 45  ### #TSHIBOLA 1#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("(.*)\\s+(TSHIBOLA 1)\\s+(*.){1,}","\\1 \\2", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("(.*)\\s+(TSHIBOLA)\\s+(1)(*.)","\\1 \\2 \\4", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### 46  ### #OSWAR 1#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("(.*)\\s+(OSWAR 1)\\s+(*.){1,}","\\1 \\2", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("(.*)\\s+(OSWAR)\\s+(1)(*.)","\\1 \\2 \\4", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+
+### 47 ### #COLLEGE#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(COLLEGE)\\s+(*.)(.*)\\s+(COLLEGE)(*.)","\\1 \\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(COLLEGE)\\s+(*.)(.*)\\s+(COLLEGE)(*.)","\\4 \\5", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### 48 ### #LYCEE#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(LYCEE)\\s+(*.)(.*)\\s+(LYCEE)(*.)","\\1 \\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(LYCEE)\\s+(*.)(.*)\\s+(LYCEE)(*.)","\\4 \\5", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+
+### 49 ### #COMPLEXE SCOLAIRE#
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(COMPLEXE SCOLAIRE)\\s+(*.)(.*)\\s+(COMPLEXE SCOLAIRE)(*.)","\\1 \\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(COMPLEXE SCOLAIRE)\\s+(*.)(.*)\\s+(COMPLEXE SCOLAIRE)(*.)","\\4 \\5", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+
+### 50 ### #COMPLEXE SCOLAIRE - COLLEGE #
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(COMPLEXE SCOLAIRE)\\s+(*.)(.*)\\s+(COLLEGE)(*.)","\\1 \\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(COMPLEXE SCOLAIRE)\\s+(*.)(.*)\\s+(COLLEGE)(*.)","\\4 \\5", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+
+### 51 ### #ECOLE PRIMAIRE - ECOLE MATERNELLE #
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(ECOLE PRIMAIRE)\\s+(*.)(.*)\\s+(ECOLE MATERNELLE)(*.)","\\1 \\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(ECOLE PRIMAIRE)\\s+(*.)(.*)\\s+(ECOLE MATERNELLE)(*.)","\\4 \\5", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### 52 ### #ECOLE PRIMAIRE - COLLEGE #
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(ECOLE PRIMAIRE)\\s+(*.)(.*)\\s+(COLLEGE)(*.)","\\1 \\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(ECOLE PRIMAIRE)\\s+(*.)(.*)\\s+(COLLEGE)(*.)","\\4 \\5", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### 53 ### #COMPLEXE SCOLAIRE - INSTITUT #
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(COMPLEXE SCOLAIRE)\\s+(*.)(.*)\\s+(INSTITUT)(*.)","\\1 \\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(COMPLEXE SCOLAIRE)\\s+(*.)(.*)\\s+(INSTITUT)(*.)","\\4 \\5", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+
+### ###
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(COMPLEXE SCOLAIRE)\\s+(CSCM)\\s+(ECOLE MATERNELLE)\\s+(*.)","\\1 \\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(COMPLEXE SCOLAIRE)\\s+(CSCM)\\s+(ECOLE MATERNELLE)\\s+(*.)","\\3 \\2 \\4", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### ###
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(INSTITUT)(*.)(.*)(COMPLEXE SCOLAIRE)","\\1 \\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(INSTITUT)(*.)(.*)(COMPLEXE SCOLAIRE)","\\4 \\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### ###
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(LYCEE)(*.)(.*)(INSTITUT TECHNIQUE PROFESSIONNEL)","\\1 \\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(LYCEE)(*.)(.*)(INSTITUT TECHNIQUE PROFESSIONNEL)","\\4 \\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### ###
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(COLLEGE)\\s+(EX)\\s+(LYCEE)(*.)","\\1 \\4", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(COLLEGE)\\s+(EX)\\s+(LYCEE)(*.)","\\3 \\4", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### ###
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(ECOLE PRIMAIRE)\\s+(CFR)\\s+(COMPLEXE SCOLAIRE)(*.)","\\1 \\2 \\4", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(ECOLE PRIMAIRE)\\s+(CFR)\\s+(COMPLEXE SCOLAIRE)(*.)","\\3 \\2 \\4", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### ###
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(ECOLE PRIMAIRE)\\s+(SC)\\s+(LYCEE)(*.)","\\3 \\2 \\4", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(ECOLE PRIMAIRE)\\s+(SC)\\s+(LYCEE)(*.)","\\1 \\2 \\4", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### ###
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("(.*)(ECOLE PRIMAIRE 3)(*.)","\\1", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("(.*)(ECOLE PRIMAIRE 3)(*.)","\\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### ###
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("^(ECOLE PRIMAIRE)\\s+(*.)(.*)\\s+(ECOLE PRIMAIRE PANZI)","\\1 \\2 \\3", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("^(ECOLE PRIMAIRE)\\s+(*.)(.*)\\s+(ECOLE PRIMAIRE PANZI)","\\4", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### ###
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("(.*)\\s+([0-9])\\s+(DORCAS)\\s+(*.)","\\1 \\3 \\2", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("(.*)\\s+([0-9])\\s+(DORCAS)\\s+(*.)","\\1 \\3 \\4", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("(.*)\\s+([0-9])\\s+(KATUBA)\\s+(*.)","\\1 \\3 \\2", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("(.*)\\s+([0-9])\\s+(KATUBA)\\s+(*.)","\\1 \\3 \\4", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("(.*)\\s+([0-9])\\s+(CONTRE)\\s+(*.)","\\1 \\3 \\2", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("(.*)\\s+([0-9])\\s+(CONTRE)\\s+(*.)","\\1 \\3 \\4", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("(.*)\\s+([0-9])\\s+(MALACHIE)\\s+(*.)","\\1 \\3 \\2", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("(.*)\\s+([0-9])\\s+(MALACHIE)\\s+(*.)","\\1 \\3 \\4", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("(.*)\\s+([0-9])\\s+(POMBO)\\s+(*.)","\\1 \\3 \\2", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("(.*)\\s+([0-9])\\s+(POMBO)\\s+(*.)","\\1 \\3 \\4", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("(.*)\\s+([0-9])\\s+(MOSANGE)\\s+(*.)","\\1 \\3 \\2", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("(.*)\\s+([0-9])\\s+(MOSANGE)\\s+(*.)","\\1 \\3 \\4", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("(.*)\\s+([0-9])\\s+(DWE)\\s+(*.)","\\1 \\3 \\2", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("(.*)\\s+([0-9])\\s+(DWE)\\s+(*.)","\\1 \\3 \\4", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("(.*)\\s+([0-9])\\s+([0-9])\\s+(KUSUANGANA)","\\1 \\4 \\2", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("(.*)\\s+([0-9])\\s+([0-9])\\s+(KUSUANGANA)","\\1 \\4 \\2", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==1, gsub("(.*)\\s+([0-9])\\s+([0-9])\\s+(GAMA)","\\1 \\4 \\2", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+allschools.expanded$NomEcole <- ifelse(allschools.expanded$ind==2, gsub("(.*)\\s+([0-9])\\s+([0-9])\\s+(GAMA)","\\1 \\4 \\2", allschools.expanded$NomEcole, fixed=FALSE), allschools.expanded$NomEcole) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+
+allschools.expanded <- allschools.expanded %>% dplyr::mutate(multi = str_count(NomEcole, "PRIMAIRE\\s|MATERNELLE\\s|COMPLEXE\\s|GROUPE\\s|INSTITUT\\s|COLLEGE\\s|LYCEE\\s|INSTITUT$")) %>%  # CONTAINING DIFFERENT SCHOOLS
+  dplyr::mutate(digits = str_count(NomEcole, "[0-9]"))  # CONTAINING DIGITS
+yes_pb_expanded <- allschools.expanded %>%
+  dplyr::filter(multi > 1) 
+
+yes_pb_digits <- allschools.expanded %>% dplyr::filter(digits >= 2)
+
+allschools.expanded <- allschools.expanded %>% distinct(NomEcole, .keep_all=TRUE)  %>% dplyr::mutate(merge=1)
+
+```
+
+Combine the expanded version with the clean version
+```{r}
+sigeschools.all <- dplyr::bind_rows(allschools, allschools.expanded) %>%
+                       dplyr::mutate_at(c('merge'), ~replace_na(.,0))
+sigeschools.all <- sigeschools.all[!(sigeschools.all$dup == 1 & sigeschools.all$merge == 0),]
+
+# REMOVE JUST INSTITUT, LYCEE, AND COLLEGE
+sigeschools.all <- sigeschools.all %>% dplyr::filter(!str_detect(NomEcole, "^INSTITUT$")) %>%
+  dplyr::filter(!str_detect(NomEcole, "^LYCEE$")) %>%
+  dplyr::filter(!str_detect(NomEcole, "^COLLEGE$")) 
+
+
+```
+
+
+Add school information for one words
+```{r}
+sigeschools.all.expanded <- sigeschools.all[rep(row.names(sigeschools.all), ifelse(sigeschools.all$pb7==1, 7, 1)), ] %>% filter(pb7 == 1) %>% group_by(NomEcole) %>% dplyr::mutate(ind_single = row_number()) 
+
+sigeschools.all.expanded$NomEcole<- paste(sigeschools.all.expanded$ind_single, sigeschools.all.expanded$NomEcole)
+
+sigeschools.all.expanded <- sigeschools.all.expanded %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(1)\\s+(*.)", "ECOLE PRIMAIRE \\2", .))) %>%  
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(2)\\s+(*.)", "ECOLE MATERNELLE \\2", .))) %>% 
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(3)\\s+(*.)", "COLLEGE \\2", .))) %>%  
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(4)\\s+(*.)", "LYCEE \\2", .))) %>%  
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(5)\\s+(*.)", "INSTITUT \\2", .))) %>%  
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(6)\\s+(*.)","COMPLEXE SCOLAIRE \\2", .))) %>%  
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(7)\\s+(*.)", "GROUPE SCOLAIRE \\2", .))) %>%  
+        dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("\\s\\s", " ", .))) %>% # DOUBLE SPACE
+         dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^\\s|\\s$", "", .))) %>%   # SINGLE SPACE BEGINNING OR END
+ dplyr::mutate(merge_single=1)
+
+```
+
+Merge the final version
+```{r}
+sigeschools.all.final <- dplyr::bind_rows(sigeschools.all, sigeschools.all.expanded)  %>%
+                       dplyr::mutate_at(c('merge_single'), ~replace_na(.,0))
+sigeschools.all.final <- sigeschools.all.final[!(sigeschools.all.final$pb7 == 1 & sigeschools.all.final$merge_single == 0),]
+
+sigeschools.all.final <- sigeschools.all.final %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(.*)( \\d )(.*)", "\\1 \\3\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("1 TUT ", " ", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(1)(COLLEGE)(.*)", "\\2 \\3", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(1)(ECOLE)(.*)", "\\2 \\3", .))) %>%
+  dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("(1)(LYCEE)(.*)", "\\2 \\3", .))) %>%
+   dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("\\s\\s", " ", .))) %>% # DOUBLE SPACE
+         dplyr::mutate_at(.vars=vars(NomEcole), list(~ gsub("^\\s|\\s$", "", .))) %>%   # SINGLE SPACE BEGINNING OR END
+  dplyr::mutate_at(.vars=vars(Sproved), list(~ gsub("(.*)\\s+([0-9])$", "\\1", .))) 
+
+
+library(writexl)
+write_xlsx(cenischools.all.final, paste((file.path(here() %>% dirname(), "raw")),'sigeschools_clean_v3.xlsx', sep="/"))
+#write_xlsx(sigeschools.all.final,"sigeschools_clean_v3.xlsx")
+```
+
+Because the variables _province_ in CENI and _ProvincePoliAdmin_ in SIGE perfectly match only if the dashes are removed in some of the province names in SIGE, I'm fixing it below by removing the dashes.
+
+```{r}
+sigeschools.all <- read_excel(paste((file.path(here() %>% dirname(), "raw")),'sigeschools_clean_v3.xlsx', sep="/")) %>% 
+  dplyr::mutate_at(.vars=vars(ProvincePoliAdmin), list(~ gsub("-", " ", .))) # Harmonize province name
+```
+
+Another harmonization is done below with the variables _circonscription_ in CENI and _Territoire_ in SIGE. I did a check in another RScript to see if _circonscription_ and _Territoire_ names perfectly match. I found some _Territoire_ names had _'ville'_ at the end, and there were some punctuation mistakes as well as typos. I stored all these variable names in an Excel, and make necessary changes in the code below.
+
+```{r}
+
+names <- read_excel(paste((file.path(here() %>% dirname(), "raw")),'sige_territoire_edit.xlsx', sep="/"))
+old_names <- as.list(names$old_names)
+new_names <- as.list(names$new_names)
+
+for(i in seq_along(old_names)){
+  sigeschools.all <- sigeschools.all %>% dplyr::mutate_at(.vars=vars(Territoire), list(~ gsub(old_names[i], new_names[i], .)))
+}
+
+```
+
+```{r}
+sigeschools <- sigeschools.all %>% dplyr::mutate(NomEcole = gsub("[[:blank:]]", "",NomEcole)) %>% dplyr::mutate(dupcheck = paste(NomEcole, ProvincePoliAdmin, Proved, Sproved, Territoire)) %>% dplyr::mutate(dupcheck = gsub("[[:blank:]]", "", dupcheck)) %>% group_by(dupcheck) %>% add_count(name="occurence") %>% dplyr::mutate(town_province = paste(ProvincePoliAdmin, Proved, Sproved, Territoire)) %>% dplyr::mutate(town_province = gsub("[[:blank:]]", "", town_province)) 
+
+sigeschools <- sigeschools[, -13:-55]
+sigeschools$latitude <- as.numeric(sigeschools$latitude)
+sigeschools$longitude <- as.numeric(sigeschools$longitude)
+
+dups <- sigeschools %>% dplyr::filter(occurence >= 3)
+
+## for these dups, filter by dupcheck, check distance between schools.
+
+territoire <-  unique(dups$town_province)
+
+for(t in territoire) {
+temp_matching <- dups %>% dplyr::filter(town_province == t ) 
+temp_sf0 <- st_as_sf(temp_matching, coords = c("GPS_longitude", "GPS_latitude"), 
+                                    crs = 4326)
+my_list <- unique(temp_matching$dupcheck)
+for(m in my_list) {
+temp_sf <- temp_sf0 %>% dplyr::filter(dupcheck == m)
+for(i in 1:length(my_list)){
+lead <- temp_sf %>% dplyr::mutate(lead = geometry[row_number() + i])
+dist <- lead %>% dplyr::mutate(dist = st_distance(geometry, lead, by_element = T))
+dist_df <- as.data.frame(dist$dist)
+dist_df <- lapply(dist_df,as.numeric)
+lead_df <- as.data.frame(lead$lead)
+dupcheck_2 <- temp_sf %>% dplyr::mutate(dupcheck_2 = dupcheck[row_number() + i])
+dupcheck_2 <- as.data.frame(dupcheck_2$dupcheck_2)
+temp_sf[paste0("lead", i-1)] <- lead_df
+temp_sf[paste0("dist", i-1)] <- dist_df
+temp_sf[paste0("dupcheck_", i-1)] <- dupcheck_2
+}
+x = nrow(temp_sf)
+if (x > 1) {
+df <- temp_sf %>% filter_at(vars(matches("dist")), any_vars(. > 1000 | . == 0))
+new_rows <- df[ , grepl( "dupcheck" , names(df) )]
+matched <- data.frame(dupcheck = na.omit(unlist(new_rows, use.names= FALSE)))
+matched_final <- as.data.frame(matched[grepl("[A-Za-z]", matched$dupcheck),])
+colnames(matched_final)[1] <- "dupcheck"
+df_final <- dplyr::filter(dups, dupcheck %in% matched_final$dupcheck)
+} else {
+  df <- temp_sf
+df_final <- dplyr::filter(dups, dupcheck %in% df$dupcheck)
+}
+
+assign(m, df_final)
+}
+}
+
+a = ls()
+index = which(str_detect(a, "[[:upper:]]"))
+b = a[index]
+matching_binded <- do.call(bind_rows, lapply(b, get, env=environment())) 
+# this is for the observations where I'm keeping the matches
+#For the observations where the duplicates should be removed and only one observation should be kept, I'm storing them in another list:
+rm(matched_final, matched, new_rows, new_names, old_names, df, df_final)
+
+alldfnames = names(which(unlist(eapply(.GlobalEnv,is.data.frame))))
+
+rowCounts = sapply(alldfnames,function(x) ifelse(nrow(get(x))==0,1,0))
+
+emptydf = names(Filter(function(f) f==1, rowCounts)) ## store empty dataframes
+empty = data.frame(emptydf)
+
+write_xlsx(matching_binded, "dups1.xlsx")
+write_xlsx(empty, "dups1empty1.xlsx")
+
+###############################################################################
+## I'm doing the same thing for the duplicates which have 2 observations in the dataset. 
+## I'm doing this separately because of the computational limits of datasize. 
+###############################################################################
+
+#rm(list=b)
+sigeschools <- sigeschools.all %>% dplyr::mutate(NomEcole = gsub("[[:blank:]]", "",NomEcole)) %>% dplyr::mutate(dupcheck = paste(NomEcole, ProvincePoliAdmin, Proved, Sproved, Territoire)) %>% dplyr::mutate(dupcheck = gsub("[[:blank:]]", "", dupcheck)) %>% group_by(dupcheck) %>% add_count(name="occurence") %>% dplyr::mutate(town_province = paste(ProvincePoliAdmin, Proved, Sproved, Territoire)) %>% dplyr::mutate(town_province = gsub("[[:blank:]]", "", town_province)) 
+
+sigeschools <- sigeschools[, -13:-55]
+sigeschools$latitude <- as.numeric(sigeschools$latitude)
+sigeschools$longitude <- as.numeric(sigeschools$longitude)
+
+dups <- sigeschools %>% dplyr::filter(occurence == 2) %>% arrange(dupcheck) 
+dups1 <- dups %>% .[1:1000,] #12002 obs
+dups2 <- dups %>% .[1001:2000,] 
+dups3 <- dups %>% .[2001:3500,]
+dups4 <- dups %>% .[3501:5000,]
+dups5 <- dups %>% .[5001:6500,]
+dups6 <- dups %>% .[6501:9500,]
+dups7 <- dups %>% .[9501:12002,]
+
+
+## for these dups, filter by dupcheck, check distance between schools.
+
+territoire <-  unique(dups7$town_province)
+
+for(t in territoire) {
+temp_matching <- dups7 %>% dplyr::filter(town_province == t ) 
+temp_sf0 <- st_as_sf(temp_matching, coords = c("GPS_longitude", "GPS_latitude"), 
+                                    crs = 4326)
+my_list <- unique(temp_matching$dupcheck)
+for(m in my_list) {
+temp_sf <- temp_sf0 %>% dplyr::filter(dupcheck == m)
+for(i in 1:length(my_list)){
+lead <- temp_sf %>% dplyr::mutate(lead = geometry[row_number() + i])
+dist <- lead %>% dplyr::mutate(dist = st_distance(geometry, lead, by_element = T))
+dist_df <- as.data.frame(dist$dist)
+dist_df <- lapply(dist_df,as.numeric)
+lead_df <- as.data.frame(lead$lead)
+dupcheck_2 <- temp_sf %>% dplyr::mutate(dupcheck_2 = dupcheck[row_number() + i])
+dupcheck_2 <- as.data.frame(dupcheck_2$dupcheck_2)
+temp_sf[paste0("lead", i-1)] <- lead_df
+temp_sf[paste0("dist", i-1)] <- dist_df
+temp_sf[paste0("dupcheck_", i-1)] <- dupcheck_2
+}
+x = nrow(temp_sf)
+if (x > 1) {
+df <- temp_sf %>% filter_at(vars(matches("dist")), any_vars(. > 1000 | . == 0))
+new_rows <- df[ , grepl( "dupcheck" , names(df) )]
+matched <- data.frame(dupcheck = na.omit(unlist(new_rows, use.names= FALSE)))
+matched_final <- as.data.frame(matched[grepl("[A-Za-z]", matched$dupcheck),])
+colnames(matched_final)[1] <- "dupcheck"
+df_final <- dplyr::filter(dups7, dupcheck %in% matched_final$dupcheck)
+} else {
+  df <- temp_sf
+df_final <- dplyr::filter(dups7, dupcheck %in% df$dupcheck)
+}
+
+assign(m, df_final)
+}
+}
+
+a = ls()
+index = which(str_detect(a, "[[:upper:]]"))
+b = a[index]
+matching_binded8 <- do.call(bind_rows, lapply(b, get, env=environment())) # this is for the observations where I'm keeping the matches
+#For the observations where the duplicates should be removed and only one observation should be kept, I'm storing them in another list:
+rm(matched_final, matched, new_rows, new_names, old_names, df, df_final)
+
+alldfnames = names(which(unlist(eapply(.GlobalEnv,is.data.frame))))
+
+rowCounts = sapply(alldfnames,function(x) ifelse(nrow(get(x))==0,1,0))
+
+emptydf8 = names(Filter(function(f) f==1, rowCounts)) ## store empty dataframes
+
+empty8 = data.frame(emptydf8)
+
+write_xlsx(matching_binded8, "dups8.xlsx")
+write_xlsx(empty8, "dups8empty8.xlsx")
+
+
+matching_binded1 <- read_xlsx("dups1.xlsx") %>% .[, 1:15]
+empty1 <- read_xlsx("dups1empty1.xlsx")
+
+matching_binded3 <- matching_binded3[, 1:15]
+matching_binded5 <- matching_binded5[, 1:15]
+matching_binded8 <- matching_binded8[, 1:15]
+
+for (i in paste0("empty",1:8)){
+  d=get(i)
+  colnames(d)[1]="dupcheck"
+  assign(i,d)
+}
+
+empty_all <- bind_rows(empty1, empty2, empty3, empty4, empty5, empty6, empty7, empty8)
+
+sigeschools1 <- sigeschools %>% mutate(keepone = ifelse(dupcheck %in% empty_all$dupcheck, 1, 0))
+
+sigeschools_temp1 <- sigeschools1 %>% dplyr::filter(occurence==1) %>% .[,1:15]
+sigeschools_temp2 <- sigeschools1 %>% dplyr::filter(occurence>1 & keepone==1) %>% distinct(dupcheck,.keep_all=TRUE)  %>% .[,1:15]
+sigeschools_temp3 <- bind_rows(matching_binded1, matching_binded2, matching_binded3, matching_binded4, matching_binded5, matching_binded6, matching_binded7, matching_binded8)
+
+sigeschools_final <- bind_rows(sigeschools_temp1, sigeschools_temp2, sigeschools_temp3) %>% group_by(dupcheck) %>% add_count(name="occurence2") %>% group_by(dupcheck) %>% mutate(diff = occurence - occurence2) %>% arrange(diff) %>% .[-9:-16,1:12]
+
+
+
+write_xlsx(sigeschools_final, paste((file.path(here() %>% dirname(), "raw")),'sigeschools.xlsx', sep="/"))
+
+
+
+```

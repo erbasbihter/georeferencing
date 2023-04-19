@@ -1,0 +1,490 @@
+---
+title: "Georeference for Big Cities"
+author: "Bihter Erbas"
+date: "28/02/2023"
+output: pdf_document
+---
+### 1. Load packages and variables
+I load CENI and SIGE datasets which contain harmonized school names.
+
+```{r setup, include=FALSE}
+rm(list=ls())
+library(sf)
+library(rgeos)
+library(rgdal)
+library(dplyr)
+library(tidyverse)
+library(stringr)
+library(readxl)
+library(tmap)
+library(rstudioapi)
+library(here) # Package to access parent directory while reading files (to rerun the code smoothly anywhere)
+
+# Set the path current open file
+current_path = rstudioapi::getActiveDocumentContext()$path 
+setwd(dirname(current_path ))
+
+cenischools.all.final <- read_excel(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "raw")),'cenischools_clean_v3.xlsx', sep="/"))
+sigeschools.all <- read_excel(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "raw")),'sigeschools.xlsx', sep="/"))
+```
+
+### 2. Generate Matching Variable CENI
+I filter the CENI data just to keep data points for big cities, and create a matching variable which is the `r names(cenischools.all.final[6])`. In the end, we have 32 unique ville names.
+
+```{r cars}
+ceni_villes <- cenischools.all.final %>%
+  dplyr::mutate(ceni_nom_sv = toupper(ceni_nom_sv)) %>%
+  dplyr::filter(str_detect(circonscription,"\\sVILLE$"))%>%
+  dplyr::mutate_at(.vars=vars(circonscription), list(~ gsub(" ", "", .)))
+
+ceni_villes_match <- ceni_villes %>%
+  dplyr::select(c("ceni_site_vote_ID","ceni_nom_sv","province","circonscription")) %>%
+  dplyr::mutate(match_var = paste(ceni_nom_sv)) %>%
+  dplyr::mutate(match_var = str_replace_all(match_var, fixed(" "), "")) 
+
+```
+
+### 3. Load Ville coordinates and convert into shapefile
+
+```{r}
+ville <- read_excel(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "raw")),'villes_GPS_rdc.xlsx', sep="/"))
+ville <- ville %>% dplyr::mutate_at(.vars=vars(city), list(~ gsub(" ", "", .)))
+villes_sf = st_as_sf(ville, coords = c("longitude","latitude"), 
+                                    crs = 4326)
+```
+
+### 4. SIGE Dataset and Shapefile
+
+Next, I edit the SIGE dataset by removing any spaces from the school name etc. and convert it into a shapefile using the GPS coordinates.
+
+```{r}
+sigeschools.all$NomEcole <- str_replace_all(sigeschools.all$NomEcole, fixed(" "), "")
+
+# Extract villes in the SIGE data
+sigeschools.all <- sigeschools.all %>%
+  dplyr::mutate(NomEcole = toupper(NomEcole)) 
+
+sigeschools.all_sf = st_as_sf(sigeschools.all, coords = c("GPS_longitude", "GPS_latitude"), 
+                                    crs = 4326)
+
+```
+
+### 5. Looping and Creating Additional Schools within Each Unit
+
+In this section, I extract the _circonscription_ names from the ceni_villes_match dataset and run a loop over each commune to get the final data before I perform the matching:
+
+```{r}
+
+villes <- unique(ceni_villes$circonscription)
+buffers <- c(10000, 12000, 15000)
+
+for(v in villes) {
+  for(i in buffers) {
+  temp_villes_sf <- villes_sf %>%
+    dplyr::filter(city == v)
+  
+  temp_ceni_villes_match <- ceni_villes_match %>% dplyr::filter(circonscription == v)
+  
+  temp_villes_sf_buffer_10km <- st_buffer(temp_villes_sf, i)
+  
+  # Identify schools falling within city's buffer
+  sigeschools.all_sf_admin <- st_join(sigeschools.all_sf,  temp_villes_sf_buffer_10km) %>%
+    dplyr::filter(!is.na(city)) %>%
+    dplyr::distinct(NomEcole, geometry, .keep_all = TRUE) #%>%
+    #dplyr::distinct(NomEcole, city, .keep_all = TRUE) # HERE I REMOVE DUPLICATE WITHIN SAME VILLE
+  
+    # Generate Matching Variable SIGE
+  temp_sige_match <- sigeschools.all_sf_admin %>%
+    dplyr::mutate(match_var = paste(NomEcole)) %>%
+    dplyr::mutate(match_var = str_replace_all(match_var, fixed(" "), "")) %>%
+    #dplyr::filter(city == v) %>% ##?
+    dplyr::select(c("match_var","latitude","longitude", "Territoire")) %>%
+    dplyr::mutate(info = NA)
+  
+  temp_sige_match <- temp_sige_match %>% 
+    dplyr::mutate(match_var_trimmed = match_var) %>%
+    dplyr::mutate_at(.vars=vars(match_var_trimmed),  list(~ gsub("COMPLEXESCOLAIRE|ECOLEMATERNELLE|COLLEGE|ECOLEPRIMAIRE|LYCEE|INSTITUT|INSTITUTSCIENTIFIQUE|INSTITUTTECHNIQUEAGRICOLE|INSTITUTTECHNIQUEPROFESSIONNEL|INSTITUTTECHNOLOGIQUE|GROUPESCOLAIRE|ACADEMIE", "", .))) %>%  # remove school types
+    group_by(match_var_trimmed, geometry) %>% add_count(name = "occurence") 
+  
+# Take all the 1 occurences and add other school types in here
+  temp_sige_match.expanded <- temp_sige_match[rep(row.names(temp_sige_match), ifelse(temp_sige_match$occurence==1, 8, 1)), ] %>%
+    group_by(match_var_trimmed) %>% dplyr::mutate(ind = row_number()) %>% filter(occurence == 1)
+
+  temp_sige_match.expanded$match_var_trimmed <- paste(temp_sige_match.expanded$ind, temp_sige_match.expanded$match_var_trimmed)
+  
+ temp_sige_match.expanded<- temp_sige_match.expanded %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(1)\\s+(*.)",
+                                                              "ECOLEPRIMAIRE\\2", .))) %>%  
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(2)\\s+(*.)",
+                                                              " ECOLEMATERNELLE\\2", .))) %>% 
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(3)\\s+(*.)", 
+                                                              " COLLEGE\\2", .))) %>%  
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(4)\\s+(*.)",
+                                                              " LYCEE\\2", .))) %>%  
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(5)\\s+(*.)",
+                                                              " INSTITUT\\2", .))) %>%  
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(6)\\s+(*.)",
+                                                              " GROUPESCOLAIRE\\2", .))) %>%  
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(7)\\s+(*.)",
+                                                              " COMPLEXESCOLAIRE\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(8)\\s+(*.)",
+                                                              " ACADEMIE\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("\\s\\s", " ", .))) %>% # DOUBLE SPACE
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("^\\s|\\s$", "", .))) %>%   # SINGLE SPACE BEGINNING OR END
+ dplyr::mutate(merge_exp=1)
+  
+ temp_sige_match.final <- dplyr::bind_rows(temp_sige_match,  temp_sige_match.expanded)  %>%
+                       dplyr::mutate_at(c('merge_exp'), ~replace_na(.,0))
+ 
+ temp_sige_match.final <- temp_sige_match.final %>% dplyr::mutate(match_var = ifelse(occurence == 1, match_var_trimmed, match_var)) 
+ 
+ 
+ matching <- left_join(temp_ceni_villes_match,temp_sige_match.final, by = "match_var") 
+
+assign(paste0(v,i), matching)
+ }
+}
+# mylist <- ls(pattern='VILLE')
+# matching <- do.call(rbind, lapply(mylist, get, env=environment()))
+
+a = ls()
+index_10 = which(str_detect(a, "[[:upper:]]10000"))
+b_10 = a[index_10]
+matching_binded_10 <- do.call(rbind, lapply(b_10, get, env=environment()))
+
+index_12 = which(str_detect(a, "[[:upper:]]12000"))
+b_12 = a[index_12]
+matching_binded_12 <- do.call(rbind, lapply(b_12, get, env=environment()))
+
+index_15 = which(str_detect(a, "[[:upper:]]15000"))
+b_15 = a[index_15]
+matching_binded_15 <- do.call(rbind, lapply(b_15, get, env=environment()))
+```
+
+Within the loop, first I filter the circonscription names in the villes_sf and CENI shapefiles. Then I create a 10km buffer around the coordinates. I join the sigeschools and buffer shapefiles, I identify the schools falling within each commune's buffer. Afterwards, I count the school names without the school type and for single observations, I create additional school types and store them in the temp_sige_match.expanded dataframe. I append the extended dataset with the initial one without duplicates in the temp_sige_match.final dataset. Finally, for each of the circonscription I perform matching with ceni and sige match dataframes.
+
+\newpage
+
+### 6. Statistics - Voting Stations
+
+Below are the statistics for voting stations which are schools. Number of voting stations which are schools is highest in BUJI-MAYIVILLE and BUMBASHIVILLE; and lowest in INONGOVILLE (for the case when the duplicates have been created where there is only one school with a specific name). Please note that here I don't give statistics particularly for the matched school names.
+
+```{r echo=FALSE, out.width="50%"}
+# Number of voting stations by commune in CENI raw data
+ceni_voting_raw <- cenischools.all.final %>%
+  dplyr::mutate(ceni_nom_sv = toupper(ceni_nom_sv)) %>%
+  dplyr::filter(str_detect(circonscription,"\\sVILLE$"))%>%
+  dplyr::mutate_at(.vars=vars(circonscription), list(~ gsub(" ", "", .))) %>%
+  group_by(circonscription) %>% 
+  add_count(name = "voting_stations") %>%
+  dplyr::distinct(circonscription, .keep_all = TRUE) %>%
+  dplyr::select(c("circonscription", "voting_stations")) %>%
+  dplyr::arrange(as.numeric(voting_stations))
+  
+plot0 <- barplot(height=ceni_voting_raw$voting_stations, names.arg=ceni_voting_raw$circonscription,las=2, cex.names=0.6,col="cornflowerblue",ylim=c(0,220), main="Number of Voting Stations by Circonscription in the CENI Raw Data", cex=0.5)
+text(x = plot0, y = ceni_voting_raw$voting_stations, label = ceni_voting_raw$voting_stations, pos = 3 , cex = 0.6, col = "black")
+
+
+# Number of voting stations by commune
+mylist <- b_10
+mylist <- gsub("([A-Z])([0-9])(0000)", "\\1", mylist)
+names_list_df <- as.data.frame(mylist)
+names_list_df <- names_list_df %>% dplyr::mutate_at(.vars=vars(mylist), list(~ gsub("([A-Z])([0-9])(0000)", "\\1", .)))
+names_list_df <- unique(names_list_df$mylist)
+voting_stations <- data.frame(matrix(NA, nrow = length(names_list_df), ncol=2))
+for (rowIdx in 1:nrow(voting_stations)){
+  for(colIdx in 1:ncol(voting_stations)){
+  voting_stations[rowIdx, colIdx] <- names_list_df[rowIdx]
+  }
+}
+for (n in mylist){
+  voting_stations$X2 <-  ifelse(voting_stations$X2 == n, do.call(nrow, lapply(paste0(n,10000), get, env=environment())), voting_stations$X2)
+}
+
+voting_stations <- voting_stations %>% dplyr::rename(commune=X1, voting_stations_num=X2) %>%
+  dplyr::arrange(as.numeric(voting_stations_num))
+voting_stations$voting_stations_num <- as.numeric(voting_stations$voting_stations_num)
+
+plot1 <- barplot(height=voting_stations$voting_stations_num, names.arg=voting_stations$commune,las=2, cex.names=0.6,col="cornflowerblue",ylim=c(0,220), main="Voting Stations by Circonscription(with dups)", cex=0.5)
+text(x = plot1, y = voting_stations$voting_stations_num, label = voting_stations$voting_stations_num, pos = 3 , cex = 0.6, col = "black")
+
+# Distribution of schools which are voting stations in big cities
+matching_dist <- matching_binded_10 %>%
+  dplyr::mutate(ep = ifelse(str_detect(ceni_nom_sv, 
+                                       "ECOLE PRIMAIRE"), 1, 0)) %>%  # ECOLE PRIMAIRE
+  dplyr::mutate(em = ifelse(str_detect(ceni_nom_sv,
+                                       "ECOLE MATERNELLE"), 1, 0)) %>% # ECOLE MATERNELLLE
+  dplyr::mutate(cs = ifelse(str_detect(ceni_nom_sv, 
+                                       "COMPLEXE SCOLAIRE"), 1, 0)) %>% # COMPLEXE SCOLAIRE
+  dplyr::mutate(gs = ifelse(str_detect(ceni_nom_sv, 
+                                       "GROUPE SCOLAIRE"), 1, 0)) %>% # GROUPE SCOLAIRE
+  dplyr::mutate(col = ifelse(str_detect(ceni_nom_sv, 
+                                        "COLLEGE"), 1, 0)) %>% # COLLEGE
+  dplyr::mutate(lyc = ifelse(str_detect(ceni_nom_sv, 
+                                        "LYCEE"), 1, 0)) %>% # LYCEE
+  dplyr::mutate(inst = ifelse(str_detect(ceni_nom_sv, 
+                                         "INSTITUT|INSTITUT TECHNIQUE PROFESSIONNEL|
+                                         INSTITUT TECHNIQUE COMMERCIAL INDUSTRIEL|
+                                         INSTITUT TECHNIQUE COMMERCIAL|
+                                         INSTITUT TECHNIQUE|
+                                         INSTITUT TECHNIQUE COMMERCIAL INDUSTRIEL|
+                                         SCIENTIFIQUE SOCIAL|
+                                         INSTITUT TECHNIQUE COMMERICAL ADMINISTRATION DE TELY|
+                                         INSTITUT TECHNIQUE METEO AVIATION|
+                                         INSTITUT TECHNIQUE METEO|
+                                         INSTITUT TECHNIQUE AGRICOLE VETERINAIRE|
+                                         INSTITUT TECHNIQUE AGRICOLE|
+                                         INSTITUT TECHNIQUE VETERINAIRE|
+                                         INSTITUT AGRO FORESTERIE|
+                                         INSTITUT TECHNIQUE AGRICOLE PROFESSIONNEL|
+                                         INSTITUT TECHNIQUE MEDICAL CHRETIEN|
+                                         INSTITUT SUPERIEUR TECHNOLOGIQUE DE KINSHASA"), 1, 0)) %>% # INST
+   dplyr::mutate(ac = ifelse(str_detect(ceni_nom_sv, "ACADEMIE"), 1, 0)) %>% # ACADEMIE
+ mutate(tot_ecole = select(., ep:ac) %>% rowSums(na.rm = TRUE)) %>%  dplyr::mutate(others = ifelse(tot_ecole !=1, 1, 0))
+
+
+
+df <- matching_dist %>% dplyr::summarise(across(c(ep, em, cs, gs, col, lyc, inst, ac), sum)) %>% pivot_longer(cols=everything(), names_to='school_type', values_to='count') %>% arrange(count) #collapse sum and reshape long
+df$school_type[df$school_type == "ep"] <- "Ecole Primaire"
+df$school_type[df$school_type == "em"] <- "Ecole Maternelle"
+df$school_type[df$school_type == "cs"] <- "Comp. Scolaire"
+df$school_type[df$school_type == "gs"] <- "Groupe Scolaire"
+df$school_type[df$school_type == "col"] <- "College"
+df$school_type[df$school_type == "lyc"] <- "Lycee"
+df$school_type[df$school_type == "inst"] <- "Institute"
+df$school_type[df$school_type == "ac"] <- "Academie"
+
+p <- barplot(height=df$count, names.arg=df$school_type, las=2, cex.names=0.6, col="cornflowerblue", ylim=c(0,600), main="Voting Stations/Schools in Big Cities by School Type (with dups)")
+text(x = p, y = df$count, label = df$count, pos = 3 , cex = 0.8, col = "black")
+
+```
+
+### 7. Matching
+
+Below, I filter out the observations for which there is no georeference. The dataframe georeference_villes gives the observations for which we are able to successfully perform matching.
+
+```{r}
+
+expost_check10000 <- matching_binded_10 %>%
+  dplyr::filter(!is.na(as.numeric(latitude))) %>%
+  dplyr::distinct(match_var, .keep_all = TRUE)
+
+georeference_villes10000 <- matching_binded_10 %>%
+  #dplyr::select(c(ceni_site_vote_ID,latitude, longitude)) %>%
+  dplyr::filter(!is.na(latitude)) %>%
+  dplyr::mutate(source = "bigcities")
+
+matching_filtered10000 <- matching_binded_10 %>% dplyr::filter(is.na(latitude)) 
+matching_filtered_wo_dup10000 <- matching_filtered10000 %>% dplyr::filter(!str_detect(match_var, "ACADEMIE")) %>% distinct(ceni_site_vote_ID, circonscription, latitude, .keep_all=TRUE)
+
+x10000 <- nrow(georeference_villes10000)
+y10000 <- nrow(matching_binded_10)
+z10000 <- nrow(matching_filtered10000) - nrow(matching_filtered_wo_dup10000)
+
+matching_performance10000 <- x10000/(y10000-z10000)*100
+
+expost_check12000 <- matching_binded_12 %>%
+  dplyr::filter(!is.na(as.numeric(latitude))) %>%
+  dplyr::distinct(match_var, .keep_all = TRUE)
+
+georeference_villes12000 <- matching_binded_12 %>%
+  #dplyr::select(c(ceni_site_vote_ID,latitude, longitude)) %>%
+  dplyr::filter(!is.na(latitude)) %>%
+  dplyr::mutate(source = "bigcities")
+
+matching_filtered12000 <- matching_binded_12 %>% dplyr::filter(is.na(latitude)) 
+matching_filtered_wo_dup12000 <- matching_filtered12000 %>% dplyr::filter(!str_detect(match_var, "ACADEMIE")) %>% distinct(ceni_site_vote_ID, circonscription, latitude, .keep_all=TRUE)
+
+x12000 <- nrow(georeference_villes12000)
+y12000 <- nrow(matching_binded_12)
+z12000 <- nrow(matching_filtered12000) - nrow(matching_filtered_wo_dup12000)
+
+matching_performance12000 <- x12000/(y12000-z12000)*100
+
+expost_check15000 <- matching_binded_15 %>%
+  dplyr::filter(!is.na(as.numeric(latitude))) %>%
+  dplyr::distinct(match_var, .keep_all = TRUE)
+
+georeference_villes15000 <- matching_binded_15 %>%
+  #dplyr::select(c(ceni_site_vote_ID,latitude, longitude)) %>%
+  dplyr::filter(!is.na(latitude)) %>%
+  dplyr::mutate(source = "bigcities")
+
+matching_filtered15000 <- matching_binded_15 %>% dplyr::filter(is.na(latitude)) 
+matching_filtered_wo_dup15000 <- matching_filtered15000 %>% dplyr::filter(!str_detect(match_var, "ACADEMIE")) %>% distinct(ceni_site_vote_ID, circonscription, latitude, .keep_all=TRUE)
+
+x15000 <- nrow(georeference_villes15000)
+y15000 <- nrow(matching_binded_15)
+z15000 <- nrow(matching_filtered15000) - nrow(matching_filtered_wo_dup15000)
+
+matching_performance15000 <- x15000/(y15000-z15000)*100
+
+```
+
+While calculating the matching performance, I remove the duplicate schools which I created earlier while cleaning the data. Based on the calculations, the matching performance for 10 km buffer is `r matching_performance10000`$\%$. In total,  there are `r y10000-z10000`voting stations which are schools and we are able to georeference `r x10000` of them. If we use 12 km buffer, the matching performance is `r matching_performance12000`$\%$ and for 15 km buffer it is `r matching_performance15000`$\%$.
+
+```{r eval=FALSE, include=FALSE}
+library(writexl)
+write_xlsx(georeference_villes15000, paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "output")),'georeference_bigcities_15km.xlsx', sep="/"))
+#write_xlsx(georeference_villes15000,"georeference_bigcities_15km.xlsx")
+```
+
+
+### 8.Statistics - Matching
+
+The first graph below shows the distribution of matched school names by circonscription while the second graph gives the same distribution by percentages. For instance, looking at Graph 2, we see that almost 10$\%$ of the matched schools are in BUMBASHIVILLE. The third graph gives the matching performance for each commune. In KENGEVILLE, there are 8 schools (see Graph 1) and all 8 of them were matched as the performance is 100$\%$ (see Graph 3). In other groups of graphs, I provide statistics for 12 km and 15 km buffers which increase the performance slightly in areas like BOENDEVILLE and ZONGOVILLE.
+
+
+```{r echo = FALSE, out.width="50%"}
+# Number of matches by circonscription
+commune_dist <- georeference_villes10000 %>% 
+  group_by(circonscription) %>% 
+  add_count(name = "number" ) %>%
+  mutate(percent = number/nrow(georeference_villes10000)*100) %>%
+  distinct(circonscription, .keep_all=TRUE) %>%
+  arrange(number)
+
+p <- barplot(height=commune_dist$number, names.arg=commune_dist$circonscription, las=2, cex.names=0.6, col="cornflowerblue", ylim=c(0,85), main="Georeference by Circonscription (Count) 10km")
+text(x = p, y = commune_dist$number, label = commune_dist$number, pos = 3 , cex = 0.8, col = "black")
+
+p <- barplot(height=commune_dist$percent, names.arg=commune_dist$circonscription, las=2, cex.names=0.6, col="cornflowerblue", ylim=c(0,20), main="Georeference by Circonscription (Percentage) 10km")
+
+# Matching Performance by Circonscription
+commune_tot <- matching_binded_10 %>%
+  group_by(circonscription) %>%
+  add_count(name = "tot") %>%
+  distinct(circonscription, .keep_all=TRUE) %>%
+  dplyr::select(c('circonscription', 'tot'))
+
+commune_matching <- georeference_villes10000 %>% 
+  group_by(circonscription) %>% 
+  add_count(name = "number" ) %>%
+  distinct(circonscription, .keep_all=TRUE) %>%
+  dplyr::select(c('circonscription','number'))
+
+commune_performance <- left_join(commune_matching, commune_tot, by='circonscription' )
+commune_performance <- commune_performance %>% dplyr::mutate(share = number/tot*100) %>%
+  arrange(share)
+
+p <- barplot(height=commune_performance$share, names.arg=commune_performance$circonscription, las=2, cex.names=0.6, col="cornflowerblue", ylim=c(0,100), main="Matching Performance by Circonscription (Percent) 10km")
+
+######################################################################################################
+
+# Number of matches by circonscription
+commune_dist <- georeference_villes12000 %>% 
+  group_by(circonscription) %>% 
+  add_count(name = "number" ) %>%
+  mutate(percent = number/nrow(georeference_villes12000)*100) %>%
+  distinct(circonscription, .keep_all=TRUE) %>%
+  arrange(number)
+
+p <- barplot(height=commune_dist$number, names.arg=commune_dist$circonscription, las=2, cex.names=0.6, col="coral1", ylim=c(0,85), main="Georeference by Circonscription (Count) 12km")
+text(x = p, y = commune_dist$number, label = commune_dist$number, pos = 3 , cex = 0.8, col = "black")
+
+p <- barplot(height=commune_dist$percent, names.arg=commune_dist$circonscription, las=2, cex.names=0.6, col="coral1", ylim=c(0,20), main="Georeference by Circonscription (Percentage) 12km")
+
+# Matching Performance by Circonscription
+commune_tot <- matching_binded_12 %>%
+  group_by(circonscription) %>%
+  add_count(name = "tot") %>%
+  distinct(circonscription, .keep_all=TRUE) %>%
+  dplyr::select(c('circonscription', 'tot'))
+
+commune_matching <- georeference_villes12000 %>% 
+  group_by(circonscription) %>% 
+  add_count(name = "number" ) %>%
+  distinct(circonscription, .keep_all=TRUE) %>%
+  dplyr::select(c('circonscription','number'))
+
+commune_performance <- left_join(commune_matching, commune_tot, by='circonscription' )
+commune_performance <- commune_performance %>% dplyr::mutate(share = number/tot*100) %>%
+  arrange(share)
+
+p <- barplot(height=commune_performance$share, names.arg=commune_performance$circonscription, las=2, cex.names=0.6, col="coral1", ylim=c(0,100), main="Matching Performance by Circonscription (Percent) 12km")
+
+######################################################################################################
+
+# Number of matches by circonscription
+commune_dist <- georeference_villes15000 %>% 
+  group_by(circonscription) %>% 
+  add_count(name = "number" ) %>%
+  mutate(percent = number/nrow(georeference_villes15000)*100) %>%
+  distinct(circonscription, .keep_all=TRUE) %>%
+  arrange(number)
+
+p <- barplot(height=commune_dist$number, names.arg=commune_dist$circonscription, las=2, cex.names=0.6, col="darkseagreen", ylim=c(0,85), main="Georeference by Circonscription (Count) 15km")
+text(x = p, y = commune_dist$number, label = commune_dist$number, pos = 3 , cex = 0.8, col = "black")
+
+p <- barplot(height=commune_dist$percent, names.arg=commune_dist$circonscription, las=2, cex.names=0.6, col="darkseagreen", ylim=c(0,20), main="Georeference by Circonscription (Percentage) 15km")
+
+# Matching Performance by Circonscription
+commune_tot <- matching_binded_15 %>%
+  group_by(circonscription) %>%
+  add_count(name = "tot") %>%
+  distinct(circonscription, .keep_all=TRUE) %>%
+  dplyr::select(c('circonscription', 'tot'))
+
+commune_matching <- georeference_villes15000 %>% 
+  group_by(circonscription) %>% 
+  add_count(name = "number" ) %>%
+  distinct(circonscription, .keep_all=TRUE) %>%
+  dplyr::select(c('circonscription','number'))
+
+commune_performance <- left_join(commune_matching, commune_tot, by='circonscription' )
+commune_performance <- commune_performance %>% dplyr::mutate(share = number/tot*100) %>%
+  arrange(share)
+
+p <- barplot(height=commune_performance$share, names.arg=commune_performance$circonscription, las=2, cex.names=0.6, col="darkseagreen", ylim=c(0,100), main="Matching Performance by Circonscription (Percent) 15km")
+
+```
+
+### 9. Mapping
+
+```{r echo=FALSE, fig.align='center', out.width="55%"}
+congo_shp <- read_sf(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "maps/congo")),'COD_adm0.shp', sep="/"))
+georeference_shp1 <- st_as_sf(georeference_villes10000, coords = c("longitude", "latitude"), 
+                                    crs = 4326)
+map1 <- tm_shape(congo_shp) + tm_fill(col = "grey85") +
+ tm_borders(col="white", lwd = 1) +
+tm_shape(georeference_shp1) + tm_dots(col="cornflowerblue", shape = 18, size =.05, title = "Voting Stations in Big Cities 10km") +
+  tm_credits("Matched Voting Stations in Big Cities 10km",
+             position = c("LEFT", "BOTTOM")) +
+  tm_compass() + 
+  tm_scale_bar() +
+  tm_layout(frame = FALSE, 
+            legend.outside = FALSE,
+            legend.show = TRUE) 
+map1
+
+georeference_shp2 <- st_as_sf(georeference_villes12000, coords = c("longitude", "latitude"), 
+                                    crs = 4326)
+map2 <- tm_shape(congo_shp) + tm_fill(col = "grey85") +
+ tm_borders(col="white", lwd = 1) +
+tm_shape(georeference_shp2) + tm_dots(col="coral1", shape = 18, size =.05, title = "Voting Stations in Big Cities 12km") +
+  tm_credits("Matched Voting Stations in Big Cities 12km",
+             position = c("LEFT", "BOTTOM")) +
+  tm_compass() + 
+  tm_scale_bar() +
+  tm_layout(frame = FALSE, 
+            legend.outside = FALSE,
+            legend.show = TRUE) 
+map2
+
+georeference_shp3 <- st_as_sf(georeference_villes15000, coords = c("longitude", "latitude"), 
+                                    crs = 4326)
+
+map3 <- tm_shape(congo_shp) + tm_fill(col = "grey85") +
+ tm_borders(col="white", lwd = 1) +
+tm_shape(georeference_shp3) + tm_dots(col="darkseagreen", shape = 18, size =.05, title = "Voting Stations in Big Cities 15km") +
+  tm_credits("Matched Voting Stations in Big Cities 15km",
+             position = c("LEFT", "BOTTOM")) +
+  tm_compass() + 
+  tm_scale_bar() +
+  tm_layout(frame = FALSE, 
+            legend.outside = FALSE,
+            legend.show = TRUE) 
+map3
+
+
+```
+

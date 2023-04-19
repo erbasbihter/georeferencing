@@ -1,0 +1,570 @@
+---
+title: "CENI School Name Cleaning"
+output:
+  html_document:
+    code_folding: hide
+---
+
+Preliminary/Setup
+```{r}
+rm(list=ls())
+library(dplyr)
+library(tidyverse)
+library(stringr)
+library(ggplot2)
+library(rstudioapi)
+library(here) # Package to access parent directory while reading files (to rerun the code smoothly anywhere)
+
+# Set the path current open file
+current_path = rstudioapi::getActiveDocumentContext()$path 
+setwd(dirname(current_path ))
+
+
+cenischools <- read_csv(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "raw")),'ceni_election_2022_05_18.csv', sep="/"))
+```
+
+Pick voting stations which are schools
+```{r}
+
+all_schools <- c("^CS\\s","^CS\\.","^CS\\,","^C\\.S\\.","^C\\.\\sS\\.","^C\\.S\\,","^C\\.S","^C\\,S","^C\\sS","^C\\:S","^CS\\:","\\sCS\\s","^COMPLEXE\\sSCOLAIRE\\s",
+                 "^GS\\s","^GS\\.","^GS\\,","^G\\.S\\.","^G\\.\\sS\\.","^G\\.S\\,","^G\\.S","^G\\,S","^G\\sS","^G\\:S","^GS\\:","\\sGS\\s","^GROUPE\\sSCOLAIRE\\s",
+                 "^EP\\s","^EP\\.","^EP\\,","^E\\.P\\.","^E\\.\\sP\\.","^E\\.P\\,","^E\\.P","^E\\,P","^E\\sP","^E\\:P","^EP\\:","\\sEP\\s","E\\s\\sP","E\\,\\sP","E\\.\\sP","E\\.\\.P","EP\\/","^EPA","^ECOLE\\sPRIMAIRE\\s","^EP[1-9]{1}",
+                 "^EM\\s","^EM\\.","^EM\\,","^E\\.M\\.","^E\\.\\sM\\.","^E\\.M\\,","^E\\.M","^E\\,M","^E\\sM","^E\\:M","^EM\\:","\\sEM\\s","^ECOLE\\sMATERNELLE\\s",
+                 "^INSTITUT","^INST\\s","^INST\\.","^INST\\,","^INST",
+                 "^ITA","^ITC","^ITM","^ITI","^ITV","^ITP",
+                 "^I\\sT\\sA","^I\\sT\\sC","^I\\sT\\sM","^I\\sT\\sI","^I\\sT\\sV","^I\\sT\\sP",
+                 "^I\\.T\\.A","^I\\.T\\.C","^I\\.T\\.M","^I\\.T\\.I","^I\\.T\\.V","^I\\.T\\.P",
+                 "^I\\.T\\.",
+                 "^COLL\\s","^COLLEGE\\s","COLLEGE","COLEGE",
+                 "^LYCEE","LYCÉE", 
+                 "ECOLE")
+
+
+### With only a few exceptions, the code below saves only voting stations in schools
+cenischools <- cenischools %>%
+  dplyr::mutate(ceni_nom_sv = toupper(ceni_nom_sv)) %>%
+  dplyr::filter(str_detect(ceni_nom_sv,paste(all_schools, collapse = "|"))) %>%
+  dplyr::filter(!str_detect(ceni_nom_sv,"CABANE|^CABAN|^CAB\\.")) %>%
+  dplyr::filter(!str_detect(ceni_nom_sv,"\\sSANTE\\s")) %>%
+  dplyr::filter(!str_detect(ceni_nom_sv,"^\\w+$")) %>%
+  dplyr::filter(!str_detect(ceni_nom_sv,"BATIMENT")) %>%
+  dplyr::filter(!str_detect(ceni_nom_sv,"MAISON")) %>%
+  dplyr::filter(!str_detect(ceni_nom_sv,"BUREAU")) %>%
+  dplyr::filter(!str_detect(ceni_nom_sv,"RESIDENCE")) %>%
+  dplyr::filter(!str_detect(ceni_nom_sv,"TENTE")) %>%
+  dplyr::filter(!str_detect(ceni_nom_sv,"SANTE")) %>%
+  dplyr::filter(!str_detect(ceni_nom_sv,"TERRAIN")) %>%
+  dplyr::filter(!str_detect(ceni_nom_sv,"HANGARD")) %>%
+  dplyr::filter(!str_detect(ceni_nom_sv,"HOPITAL")) %>%
+  dplyr::filter(!str_detect(ceni_nom_sv,"HABITATION")) %>%
+  dplyr::filter(!str_detect(ceni_nom_sv,"^PS\\s|^P\\.S")) 
+
+cenischools$ceni_nom_sv_original <- cenischools$ceni_nom_sv
+cenischools <- cenischools %>% relocate(ceni_nom_sv_original, .before=ceni_nom_sv)
+```
+
+Detect errors(rerun after fixing the errors)
+```{r}
+cenischools <- cenischools %>%
+  dplyr::mutate(pb1a = ifelse(str_detect(ceni_nom_sv, "[[:punct:]]"), 1, 0)) %>% # PUNCTUATION
+  dplyr::mutate(pb1b = ifelse(str_detect(ceni_nom_sv, "\\s\\s"), 1, 0)) %>% # DOUBLE SPACE
+  dplyr::mutate(pb1c = ifelse(str_detect(ceni_nom_sv, "^\\s"), 1, 0)) %>% # SINGLE SPACE BEGINING NAME
+  dplyr::mutate(pb1d = ifelse(str_detect(ceni_nom_sv, "\\s$"), 1, 0)) %>%  # SINGLE SPACE END NAME
+  dplyr::mutate(pb2 = ifelse(str_detect(ceni_nom_sv, "^INST\\s|
+                                                      ^EM\\s|^E\\sM\\s|
+                                                      ^EP\\s|^E\\sP\\s|
+                                                      ^CS\\s|^C\\sS\\s|
+                                                      ^GS\\s|^G\\sS\\s"), 1, 0)) %>%  # SCHOOL ABBREVIATIONS
+  dplyr::mutate(pb3 = ifelse(str_detect(ceni_nom_sv, "^IND\\s|\\sIND\\s|
+                                                      \\sAGR\\s|\\sAGRI\\s|
+                                                       \\sTECH\\s|\\sTECHN\\s|
+                                                        \\sVET\\s|
+                                                         \\sPED\\s|\\sPEDA\\s|
+                                                          \\sSCIENT\\s|
+                                                           \\sSOC\\s|SOC.\\s|
+                                                            \\sCOM\\s|
+                                                             \\sREV\\s|
+                                                              \\sSUP\\s|
+                                                               \\sSC\\s"), 1, 0)) %>%  # ABBREVIATIONS
+  dplyr::mutate(pb4 = ifelse(str_detect(ceni_nom_sv, "\\sST\\s|^ST.|^ST\\s|\\sST.\\s"), 1, 0)) %>%  # ST INSTEAD OF SAINT
+  dplyr::mutate(pb5 = ifelse(str_detect(ceni_nom_sv, "\\sSTE\\s|^STE.|^STE\\s|\\sSTE.\\s"), 1, 0)) %>%  # STE INSTEAD OF SAINTE
+  dplyr::mutate(pb6  = ifelse(str_detect(ceni_nom_sv, "\\sI\\sI\\s|\\sI\\s|\\sVI\\sI|\\sVI\\sI\\s"), 1, 0)) %>% # ROMAN NUMBERS SPLIT W/ SPACE
+  dplyr::mutate(pb7  = ifelse(str_detect(ceni_nom_sv, "\\sXII\\W|\\sXII\\s|\\WXII$|
+                                                        \\sXI\\W|\\sXI\\s|\\WXI$|
+                                                         \\sX\\W|\\sX\\s|\\WX$|
+                                                          \\sIX\\W|\\sIX\\s|\\WIX$|
+                                                           \\sVIII|\\sVIII\\s|\\WVIII$|
+                                                            \\sVII\\s|\\sVII|\\WVII$|
+                                                             \\sVI\\W|\\sVI\\s|\\WVI$|
+                                                              \\sV\\W|\\sV\\s|\\WV$|
+                                                               \\sIV\\W|\\sIV\\s|\\WIV$|
+                                                                \\sIII|\\sIII\\s|\\WIII$|
+                                                                 \\sII|\\sII\\s|\\WII$|
+                                                                  \\sI\\W|\\sI\\s|\\WI$"),  1, 0)) %>% # ROMAN NUMBERS
+  dplyr::mutate(pb8 = ifelse(str_detect(ceni_nom_sv, "[[:upper:]][[:digit:]]|[[:digit:]][[:upper:]]"), 1, 0)) %>% # NUMBERS and WORDS W/O SPACE
+  #dplyr::mutate(pb9 = ifelse(str_detect(ceni_nom_sv, "\\dET\\s|\\sET\\s"), 1, 0)) %>%
+  dplyr::mutate(pb9 = ifelse(str_detect(ceni_nom_sv, "^IT|^I\\sT|^I\\s"), 1, 0)) %>%  # STARTS WITH INST ABBREVIATIONS
+  dplyr::mutate(pb10 = ifelse(str_detect(ceni_nom_sv, "\\WL |\\WD "), 1, 0)) %>%  # NO APOSTROPHE
+  dplyr::mutate(pb11 = ifelse(str_detect(ceni_nom_sv, "[[:upper:]]ECOLE"), 1, 0)) %>%  # NO SPACE BETWEEN A STRING AND ECOLE
+  dplyr::mutate(pb12 = ifelse(str_detect(ceni_nom_sv, " EME$| EME | ER | ER$"), 1, 0)) %>%  # CONTAINING EME ET ER 
+  dplyr::mutate(pb13 = ifelse(str_detect(ceni_nom_sv, " KM DE "), 1, 0)) %>%  # CONTAINING DISTANCE
+  dplyr::mutate(pb14  = ifelse(str_detect(ceni_nom_sv, " CODE "), 1, 0)) %>%  # CONTAINING CODES
+  dplyr::mutate(pb15 = ifelse(str_detect(ceni_nom_sv, " EME | ER | EME$ | ER$"), 1, 0)) %>% # NOMBRE ORDINAL
+  dplyr::mutate(pb16 = ifelse(str_detect(ceni_nom_sv, "^INSTUTUT |^INSTIUT |^INSTUTIT |^INSTITIT |^COLEGE "), 1, 0)) %>% # TYPO
+      dplyr::mutate(multi = str_count(ceni_nom_sv, "ECOLE\\s|COMPLEXE\\s|GROUPE\\s|INSTITUT\\s|COLLEGE\\s|LYCEE\\s|INSTITUT$"))  %>% # CONTAINING DIFFERENT SCHOOLS
+      dplyr::mutate(digits = str_count(ceni_nom_sv, "[0-9]"))  %>% # CONTAINING DIGITS
+      dplyr::mutate(code = ifelse(str_detect(ceni_nom_sv, "CODE|20| KM |316|JUIN|AVRIL| EME | ER | EME$| ER$| MAI$"), 1, 0)) %>%  # CODE
+      dplyr::mutate(dup = ifelse(digits >=2 & code != 1 | multi>=2 & code != 1, 1, 0))  %>% # DUP DUMMY FOR DUPLICATES
+  mutate(tot_pb = select(., pb1b:pb16) %>% rowSums(na.rm = TRUE)) # NOT INCLUDING pb1a(punctuation error) as added apostrophe where necessary
+
+yes_pb <- cenischools %>%
+  dplyr::filter(tot_pb!=0) # you can ignore pb8 with eme numbers
+
+```
+
+Fix errors(don't change the order as there will be mistakes otherwise)
+```{r}
+cenischools <- cenischools %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("[[:punct:]]", " ", .))) %>%  # PUNCTUATION
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("LYCÉE ", "LYCEE ", .))) %>%  # PUNCTUATION
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("(\\d)([A-Z])", "\\1 \\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("([A-Z])(\\d)", "\\1 \\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("([A-Z])ECOLE", "\\1 \\2", .))) %>% # sometimes works with ecole without ()
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("\\s\\s", " ", .))) %>% # DOUBLE SPACE
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("^\\s|\\s$", "", .))) %>% # SINGLE SPACE BEGINNING OR END
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("(\\d)\\s+(EME)" , "\\1\\2", .))) %>% # trim the space between ordinary numbers
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("(.*)(\\s+)(ER)" , "\\1\\3", .))) %>% # trim the space between ordinary numbers
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub(" C P C " , " CPC ", .))) %>% # trim the space between CPC
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub(" C SC |^C SC " , " COMPLEXE SCOLAIRE ", .))) %>% # trim the space between CSC
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("^EPA ", "EP ", .))) %>% # EPA
+    dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("EPERINGETI" , "EP ERINGETI", .))) %>% # manual fix
+    dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("E PEREDJO" , "EP ERODJO", .))) %>% # manual fix
+    dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("EPEREKEY" , "EP EREKEY", .))) %>% # manual fix
+    dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("FAMUKA PRIMAIRE" , "FAMUKA ECOLE PRIMAIRE ", .))) %>% # manual fix
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("^INSTUTUT |^INSTIUT\\s|^INSTUTIT\\s|^INSTITIT\\s", "INSTITUT ", .))) %>% # INST TYPO
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("^COLEGE\\s|COLEGE ", "COLLEGE ", .))) %>% # INST TYPO
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("\\sI\\sT\\sE\\sP|\\sIT\\sE\\sP|I\\sT\\sE\\sP", " ITEP ", .))) %>% # ABBR with spaces
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("\\sI\\sS\\sT\\sK", " ISTK ", .))) %>% # ABBR with spaces
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("\\sI\\sT\\sC|\\sIT\\sC|I\\sT\\sC", " ITC ", .))) %>% # ABBR with spaces
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("\\sITC\\sI|ITC\\s", " ITCI ", .))) %>% # ABBR with spaces
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("\\sI\\sT\\sP|\\sIT\\sP|I\\sT\\sP|\\sIT\\sP", " ITP ", .))) %>% # ABBR with spaces
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("\\sI\\sT\\sM\\sA\\sT|I\\sT\\sM\\sA\\sT", " ITMAT ", .))) %>% # ABBR with spaces
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("\\sI\\sT\\sM|I\\sT\\sM", " ITM ", .))) %>% # ABBR with spaces
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("\\sI\\sT\\sA\\sV|I\\sT\\sA\\sV", " ITAV ", .))) %>% # ABBR with spaces
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("\\sI\\sT\\sI|I\\sT\\sI\\s", " ITI ", .))) %>% # ABBR with spaces
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("\\sI\\sT\\sA|I\\sT\\sA", " ITA ", .))) %>% # ABBR with spaces
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("\\sI\\sT\\sS|I\\sT\\sS", " ITS ", .))) %>% # ABBR with spaces
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("ITC\\sA\\sT", " ITCAT ", .))) %>% # ABBR with spaces
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("\\sI\\sT\\sV|I\\sT\\sV|IT\\sV", " ITV ", .))) %>% # ABBR with spaces
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("\\sI\\sT\\s|I\\sT\\s", " IT ", .))) %>% # ABBR with spaces
+      dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("\\sI\\sP\\sS|I\\sP\\sS", " IPS ", .))) %>% # ABBR with spaces
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("^\\s|\\s$", "", .))) %>% # SINGLE SPACE BEGINNING OR END
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("^ITEP\\s", " INSTITUT TECHNIQUE PROFESSIONNEL ", .))) %>% 
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("^ITC\\s", " INSTITUT TECHNIQUE COMMERCIAL ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("^ITCI\\s|^ITCI|\\sITCI\\s", " INSTITUT TECHNIQUE COMMERCIAL INDUSTRIEL ", .))) %>% 
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("^ITP\\s", " INSTITUT TECHNIQUE PROFESSIONNEL ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("^ITMAT\\s", " INSTITUT TECHNIQUE METEO AVIATION ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("^ITM\\s", " INSTITUT TECHNIQUE METEO ", .))) %>% 
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("^ITAV\\s|^ITAVE\\s", " INSTITUT TECHNIQUE AGRICOLE VETERINAIRE ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("^ITM\\s", " INSTITUT TECHNIQUE MEDICAL ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("^ITI\\s", " INSTITUT TECHNIQUE INDUSTRIEL ", .))) %>% 
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("^ITA\\s", " INSTITUT TECHNIQUE AGRICOLE ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("^ITS\\s", " INSTITUT TECHNIQUE SOCIAL ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("^ITCAT\\s", " INSTITUT TECHNIQUE COMMERICAL ADMINISTRATION DE TELY ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("^ITV\\s", " INSTITUT TECHNIQUE VETERINAIRE ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("^IT\\s", " INSTITUT TECHNIQUE ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("^IPS\\s", " INSTITUT PEDAGOGIQUE SCIENTIFIQUE ", .))) %>% 
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("^ITCI\\s", " INSTITUT TECHNIQUE COMMERCIAL INDUSTRIEL ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("^ITAF\\s", " INSTITUT AGRO FORESTERIE ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("^ITMC\\s", " INSTITUT TECHNIQUE MEDICAL CHRETIEN ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("^ITAP\\s", " INSTITUT TECHNIQUE AGRICOLE PROFESSIONNEL ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("^ISTK\\s", " INSTITUT SUPERIEUR TECHNOLOGIQUE DE KINSHASA ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("\\sINS\\s|\\sINST\\s", " INSTITUT ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub(" SC ET | SCIENTIFIQUE ET SOCIAL ", " SCIENTIFIQUE SOCIAL ", .))) %>% 
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub(" REV ", " REVEREND ", .))) %>% 
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub(" SUP ", " SUPERIEUR ", .))) %>% 
+    dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("\\s\\s", " ", .))) %>% # DOUBLE SPACE
+    dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("^\\s|\\s$", "", .))) %>% # SINGLE SPACE BEGINNING OR END
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("\\sXI\\sI" , " XII ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub(" XII\\W|\\WXII$| XII " , " 12 ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("\\sX\\sI" , " XI ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub(" XI\\W|\\WXI$| XI " , " 11 ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub(" X\\W|\\WX$| X " , " 10 ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("\\sI\\sX" , " IX ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub(" IX\\W|\\WIX$| IX " , " 9 ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("\\sVII\\sI" , " VIII ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub(" VIII|\\WVIII$| VIII " , " 8 ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("\\sVI\\sI" , " VII ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub(" VII|\\WVII$| VII " , " 7 ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub(" VI\\s|\\sVI$| VI " , " 6 ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub(" V\\W|\\WV$| V " , " 5 ", . ))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub(" IV\\W|\\WIV$| IV " , " 4 ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub(" III|\\WIII$| III " , " 3 ", . ))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub(" I I |I I$" , " II ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub(" II|\\WII$| II " , " 2 ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("\\sI\\s|\\WI$|\\sI\\W" , " 1 ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("^INST\\s" , "INSTITUT ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("^EM\\s|^E\\sM\\s|^E MAT " , "ECOLE MATERNELLE ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("^EP\\s|^E\\sP\\s|\\sEP\\s|\\sE\\sP\\s|^E P " , " ECOLE PRIMAIRE ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("^CS\\s|^C\\sS\\s" , " COMPLEXE SCOLAIRE ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("^GS\\s|^G\\sS\\s" , " GROUPE SCOLAIRE ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("^IND\\s|\\sIND\\s" , " INDUSTRIEL ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("\\sAGR\\s|\\sAGRI\\s" , " AGRICOLE ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("\\sTECH\\s|\\sTECHN\\s" , " TECHNIQUE ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("\\sVET\\s" , " VETERINAIRE ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("\\sPED\\s|\\sPEDA\\s" , " PEDAGOGIQUE ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("\\sSCIENT\\s" , " SCIENTIFIQUE ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("\\sSOC\\s" , " SOCIAL ", .))) %>%  ####?
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("\\sCOM\\s" , " COMMERCIAL ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("^ST\\s|\\sST\\s" , " SAINT ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("^STE\\s|\\sSTE\\s" , " SAINTE ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub(" L\\W" , " L'", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub(" D\\W" , " D'", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("ETECOLE" , "ET ECOLE", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("\\s+CODE.*" , " ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("\\d+\\s+KM DE.*" , "", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("^DU\\s+| DU | DE " , " ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("^( \\d )(.*)", "\\2 \\1", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub(" L'INSTITUT ", " INSTITUT", .))) %>%
+        dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("\\s\\s", " ", .))) %>% # DOUBLE SPACE
+         dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("^\\s|\\s$", "", .)))   # SINGLE SPACE BEGINNING OR END
+
+#df <- cenischools[cenischools$X == 5469 | cenischools$X == 5724 | cenischools$X == 5534 | cenischools$X == 5547 | cenischools$X == 5558 | cenischools$X == 6316 | cenischools$X == 767 | cenischools$X == 6804 | cenischools$X == 1273 | cenischools$X == 1263 | cenischools$X == 6050 | cenischools$X == 5901 | cenischools$X == 5923, ]
+
+
+```
+
+Duplicate the necessary school names and fix the errors
+```{r}
+cenischools.expanded <- cenischools[rep(row.names(cenischools), ifelse(cenischools$dup==1, 2, 1)), ]  %>% filter(dup == 1) %>%
+                    group_by(X) %>% dplyr::mutate(ind = row_number()) %>%  filter(!str_detect(ceni_nom_sv, '11'))  %>% filter(!str_detect(ceni_nom_sv, '10')) %>% filter(!str_detect(ceni_nom_sv, "31EME"))
+
+# cenischools.expanded <- cenischools.expanded %>%
+#      dplyr::mutate(count_multi = str_count(ceni_nom_sv, " PRIMAIRE |INSTITUT|COMPLEXE|GROUPE| COLLEGE | LYCEE |COLLEGE |LYCEE")) %>%
+#      arrange((count_multi)) %>%
+#      dplyr::mutate(digits_exp = str_count(ceni_nom_sv, "[0-9]"))  %>% # CONTAINING DIGITS
+#      dplyr::mutate(dup_exp = ifelse(digits_exp !=0 & count_multi >=2, 1, 0))
+
+
+
+  
+
+### ET NUMBER ### 
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==1, 
+                             gsub("(\\d){1,}\\s+(ET)\\s+(\\d){1,}\\s+(*.)","\\1 \\4", cenischools.expanded$ceni_nom_sv, fixed=FALSE),
+                             cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==2, 
+                                      gsub("(\\d){1,}\\s+(ET)\\s+(\\d){1,}\\s+(*.)","\\3 \\4", cenischools.expanded$ceni_nom_sv, fixed=FALSE),
+                                      cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+## ET ENDS WITH NUMBER ###
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==1, 
+                             gsub("(\\d){1,}\\s+(ET)\\s+(\\d){1,}$","\\1", cenischools.expanded$ceni_nom_sv, fixed=FALSE),
+                             cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==2, 
+                                      gsub("(\\d){1,}\\s+(ET)\\s+(\\d){1,}$","\\3", cenischools.expanded$ceni_nom_sv, fixed=FALSE),
+                                      cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### EX SCHOOL NAMES ###
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==1, 
+                                           gsub("EX ECOLE PRIMAIRE.*","", cenischools.expanded$ceni_nom_sv, fixed=FALSE),
+                                           cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==2, 
+                                           gsub(".* EX", "", cenischools.expanded$ceni_nom_sv, fixed=FALSE),
+                                           cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+### ET ECOLE PRIMAIRE AND NUMBER ###
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==1, 
+                                           gsub(" ET ECOLE PRIMAIRE ([0-9])","", cenischools.expanded$ceni_nom_sv, fixed=FALSE),
+                                           cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .) ##?
+
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==2, 
+                                           gsub(".*([0-9]) ET","", cenischools.expanded$ceni_nom_sv, fixed=FALSE),
+                                           cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .) ##?
+
+
+### IPS EP CATHOLIQUE###
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==1,gsub("(INSTITUT)\\s+(PEDAGOGIQUE)\\s+(SCIENTIFIQUE)\\s+(ECOLE)\\s+(PRIMAIRE)\\s+(CATHOLIQUE)\\s+(*.)","\\1 \\2 \\3 \\7", cenischools.expanded$ceni_nom_sv, fixed=FALSE),cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .) ##?
+
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==2,gsub("^(INSTITUT)\\s+(PEDAGOGIQUE)\\s+(SCIENTIFIQUE)\\s+(ECOLE)\\s+(PRIMAIRE)\\s+(CATHOLIQUE)\\s+(*.)","\\4 \\5 \\6 \\7", cenischools.expanded$ceni_nom_sv, fixed=FALSE),cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .) ##?
+
+
+
+### ET INSTITUT ###
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==1, 
+                                           gsub("(.*)(ET)\\s+(INSTITUT)(*.)+","\\1 ", cenischools.expanded$ceni_nom_sv, fixed=FALSE),
+                                           cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .) ##?
+
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==2,gsub("(.*)( ET INSTITUT )(.*)$","INSTITUT \\3 ", cenischools.expanded$ceni_nom_sv, fixed=FALSE), cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .) ##?
+
+
+### ET ECOLE PRIMAIRE ###
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==1, 
+                                           gsub("(.*)(ET)\\s+(ECOLE PRIMAIRE)(*.)+","\\1 ", cenischools.expanded$ceni_nom_sv, fixed=FALSE),
+                                           cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .) ##?
+
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==2,gsub("(.*)( ET ECOLE PRIMAIRE )(.*)$","ECOLE PRIMAIRE \\3 ", cenischools.expanded$ceni_nom_sv, fixed=FALSE), cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .) ##?
+
+ 
+###DEUX ECOLE PRIMAIRES ###
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==1, 
+                                           gsub("(ECOLE PRIMAIRE)(.*)(*.)(ECOLE PRIMAIRE)(*.)+","\\1 \\2 \\3 ", cenischools.expanded$ceni_nom_sv, fixed=FALSE),
+                                           cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .) ##?
+
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==2,gsub("(ECOLE PRIMAIRE)(.*)(*.)(ECOLE PRIMAIRE)(.*)+","\\4 \\5 ", cenischools.expanded$ceni_nom_sv, fixed=FALSE), cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .) ##?
+
+### ET LYCEE ###
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==1, 
+                                           gsub("(.*)(ET)\\s+(LYCEE)(*.)+","\\1 ", cenischools.expanded$ceni_nom_sv, fixed=FALSE),
+                                           cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .) ##?
+
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==2,gsub("(.*)( ET LYCEE )(.*)$","LYCEE \\3 ", cenischools.expanded$ceni_nom_sv, fixed=FALSE), cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .) ##?
+
+### CS-EPENDS ###
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==1, 
+                                           gsub("(COMPLEXE SCOLAIRE)(*.)(.*)(ECOLE PRIMAIRE)$","\\1 \\2 \\3 ", cenischools.expanded$ceni_nom_sv, fixed=FALSE),
+                                           cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .) ##?
+
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==2,gsub("(COMPLEXE SCOLAIRE)(*.)(.*)(ECOLE PRIMAIRE)$","\\4 \\2 \\3 ", cenischools.expanded$ceni_nom_sv, fixed=FALSE), cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .) ##?
+
+### CS-INST ENDS ###
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==1, 
+                                           gsub("(COMPLEXE SCOLAIRE)(*.)(.*)(INSTITUT)$","\\1 \\2 \\3 ", cenischools.expanded$ceni_nom_sv, fixed=FALSE),
+                                           cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .) ##?
+
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==2,gsub("(COMPLEXE SCOLAIRE)(*.)(.*)(INSTITUT)$","\\4 \\2 \\3 ", cenischools.expanded$ceni_nom_sv, fixed=FALSE), cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .) ##?
+
+### CS-EP ###
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==1, 
+                                           gsub("^(COMPLEXE SCOLAIRE)\\s+(ECOLE PRIMAIRE)(.*)","\\1 \\3 ", cenischools.expanded$ceni_nom_sv, fixed=FALSE),
+                                           cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .) ##?
+
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==2,gsub("^(COMPLEXE SCOLAIRE)\\s+(ECOLE PRIMAIRE)(.*)","\\2 \\3 ", cenischools.expanded$ceni_nom_sv, fixed=FALSE), cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .) ##?
+
+### CS-LYCEE ###
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==1, 
+                                           gsub("^(COMPLEXE SCOLAIRE)\\s+(LYCEE)(.*)","\\1 \\3 ", cenischools.expanded$ceni_nom_sv, fixed=FALSE),
+                                           cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .) ##?
+
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==2,gsub("^(COMPLEXE SCOLAIRE)\\s+(LYCEE)(.*)","\\2 \\3 ", cenischools.expanded$ceni_nom_sv, fixed=FALSE), cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .) ##?
+
+
+### INST-CS ###
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==1, 
+                                           gsub("^(INSTITUT)\\s+(COMPLEXE SCOLAIRE)(.*)","\\1 \\3 ", cenischools.expanded$ceni_nom_sv, fixed=FALSE),
+                                           cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .) ##?
+
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==2,gsub("^(INSTITUT)\\s+(COMPLEXE SCOLAIRE)(.*)","\\2 \\3 ", cenischools.expanded$ceni_nom_sv, fixed=FALSE), cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .) ##?
+
+
+
+### EP-CS ###
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==1, 
+                                           gsub("^(ECOLE PRIMAIRE)\\s+(COMPLEXE SCOLAIRE)(.*)","\\1 \\3 ", cenischools.expanded$ceni_nom_sv, fixed=FALSE),
+                                           cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .) ##?
+
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==2,gsub("^(ECOLE PRIMAIRE)\\s+(COMPLEXE SCOLAIRE)(.*)","\\2 \\3 ", cenischools.expanded$ceni_nom_sv, fixed=FALSE), cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .) ##?
+
+### EP-COLLEGE ###
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==1, 
+                                           gsub("^(ECOLE PRIMAIRE)\\s+(COLLEGE)(.*)","\\1 \\3 ", cenischools.expanded$ceni_nom_sv, fixed=FALSE),
+                                           cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .) ##?
+
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==2,gsub("^(ECOLE PRIMAIRE)\\s+(COLLEGE)(.*)","\\2 \\3 ", cenischools.expanded$ceni_nom_sv, fixed=FALSE), cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .) ##?
+
+
+
+
+
+### ECOLE-COLLEGE ###
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==1, 
+                                           gsub("(ECOLE)(*.)(.*)(COLLEGE)(.*)","\\1 \\2 \\3 ", cenischools.expanded$ceni_nom_sv, fixed=FALSE),
+                                           cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .) ##?
+
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==2,gsub("(ECOLE)(*.)(.*)(COLLEGE)(.*)","\\4 \\5 ", cenischools.expanded$ceni_nom_sv, fixed=FALSE), cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .) ##?
+
+
+### ECOLE PRIMAIRE-INSTITUT ###
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==1, 
+                                           gsub("(ECOLE PRIMAIRE)(*.)(.*)(INSTITUT)(.*)","\\1 \\2 \\3 ", cenischools.expanded$ceni_nom_sv, fixed=FALSE),
+                                           cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .) ##?
+
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==2,gsub("(ECOLE PRIMAIRE)(*.)(.*)(INSTITUT)(.*)","\\4 \\5 ", cenischools.expanded$ceni_nom_sv, fixed=FALSE), cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .) ##?
+
+### COLLEGE-COLLEGE ###
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==1, 
+                                           gsub("(COLLEGE)(*.)(.*)(COLLEGE)(.*)","\\1 \\2 \\3 ", cenischools.expanded$ceni_nom_sv, fixed=FALSE),
+                                           cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .) ##?
+
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==2,gsub("(COLLEGE)(*.)(.*)(COLLEGE)(.*)","\\4 \\5 ", cenischools.expanded$ceni_nom_sv, fixed=FALSE), cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .) ##?
+
+### 9 ###
+cenischools.expanded <- cenischools.expanded %>%
+  dplyr::mutate(count_ep = str_count(ceni_nom_sv, " PRIMAIRE ")) %>% arrange(-count_ep) %>% # COUNTING ECOLE PRIMAIRE
+  dplyr::mutate(count_multi = str_count(ceni_nom_sv, " PRIMAIRE |INSTITUT|COMPLEXE|GROUPE")) %>% arrange(-count_multi) %>%
+  dplyr::mutate(digits_exp = str_count(ceni_nom_sv, "[0-9]"))  %>% # CONTAINING DIGITS
+  dplyr::mutate(dup_exp = ifelse(digits_exp !=0 & count_multi >=2, 1, 0)) 
+
+cenischools.expanded <- cenischools.expanded[rep(row.names(cenischools.expanded), ifelse(cenischools.expanded$dup_exp==1 & cenischools.expanded$pb1a != 1, 2, 1)), ]  %>% 
+  group_by(X) %>% dplyr::mutate(ind_exp = row_number())
+
+
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind_exp==1|cenischools.expanded$ind_exp==3, 
+                                           gsub(" FILLES ECOLE PRIMAIRE "," FILLES ", cenischools.expanded$ceni_nom_sv, fixed=FALSE),
+                                           cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind_exp==2|cenischools.expanded$ind_exp==4, 
+                                           gsub(" COMPLEXE SCOLAIRE SAINT PAUL FILLES ECOLE PRIMAIRE "," ECOLE PRIMAIRE SAINT PAUL FILLES ", cenischools.expanded$ceni_nom_sv, fixed=FALSE),
+                                           cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind_exp==1|cenischools.expanded$ind_exp==3, 
+                                           gsub(" WANGATA ECOLE PRIMAIRE "," WANGATA ", cenischools.expanded$ceni_nom_sv, fixed=FALSE),
+                                           cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind_exp==2|cenischools.expanded$ind_exp==4, 
+                                           gsub("INSTITUT WANGATA", " WANGATA ", cenischools.expanded$ceni_nom_sv, fixed=FALSE),
+                                           cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind_exp==2|cenischools.expanded$ind_exp==4, 
+                                           gsub("WANGATA ECOLE PRIMAIRE ", " ECOLE PRIMAIRE WANGATA ", cenischools.expanded$ceni_nom_sv, fixed=FALSE),
+                                           cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .)
+
+## CS-ECOLE PRIMAIRE ###
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind_exp==1|cenischools.expanded$ind_exp==3,
+                                           gsub("(COMPLEXE SCOLAIRE)(*.)(.*)(ECOLE PRIMAIRE)\\s+([0-9])$","\\1 \\2 \\3 \\4 ", cenischools.expanded$ceni_nom_sv, fixed=FALSE), cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .) ##?
+
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind_exp==2|cenischools.expanded$ind_exp==4, gsub("(COMPLEXE SCOLAIRE)(*.)(.*)(ECOLE PRIMAIRE)\\s+([0-9])$","\\4 \\2 \\3 \\5 ", cenischools.expanded$ceni_nom_sv, fixed=FALSE), cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .) ##?
+
+
+### CS-ECOLE PRIMAIRE ###
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==1, 
+                                           gsub("(COMPLEXE SCOLAIRE)(*.)(.*)(ECOLE PRIMAIRE)(.*)","\\1 \\2 \\3 ", cenischools.expanded$ceni_nom_sv, fixed=FALSE),
+                                           cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .) ##?
+
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==2,gsub("(COMPLEXE SCOLAIRE)(*.)(.*)(ECOLE PRIMAIRE)(.*)","\\4 \\5 ", cenischools.expanded$ceni_nom_sv, fixed=FALSE), cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .) ##?
+
+### INSTITUT-ECOLE PRIMAIRE ###
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==1, 
+                                           gsub("^(INSTITUT)(*.)(.*)(ECOLE PRIMAIRE)(*.)","\\1 \\2 \\3", cenischools.expanded$ceni_nom_sv, fixed=FALSE),
+                                           cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .) ##?
+
+cenischools.expanded$ceni_nom_sv <- ifelse(cenischools.expanded$ind==2, 
+                                           gsub("^(INSTITUT)(*.)(.*)(ECOLE PRIMAIRE)(*.)","\\4 \\5", cenischools.expanded$ceni_nom_sv, fixed=FALSE),
+                                           cenischools.expanded$ceni_nom_sv) %>% gsub("\\s\\s", " ", .) %>% gsub("^\\s|\\s$", "", .) ##?
+
+
+cenischools.expanded <- cenischools.expanded %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub(" ET 1 KINGABWA$", " ", .))) %>% 
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub(" MBAKI KIMWILU$", " MBAKI ", .))) %>% 
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub(" NTEMO 1 KINGABWA$", " NTEMO 1 ", .))) %>%  
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub(" KINGABWA KINGABWA$", " KINGABWA  ", .))) %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("\\s\\s", " ", .))) %>% # DOUBLE SPACE
+         dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("^\\s|\\s$", "", .)))   # SINGLE SPACE BEGINNING OR END
+
+cenischools.expanded <- cenischools.expanded %>% distinct(ceni_nom_sv, .keep_all=TRUE) %>%  arrange(desc(X)) %>% dplyr::mutate(merge=1)
+
+```
+
+
+Combine the expanded version with the clean version
+```{r}
+cenischools.all <- dplyr::bind_rows(cenischools, cenischools.expanded) %>% arrange(desc(X))  %>%
+                       dplyr::mutate_at(c('merge'), ~replace_na(.,0))
+cenischools.all <- cenischools.all[!(cenischools.all$dup == 1 & cenischools.all$merge == 0),]
+
+
+#cenischools.all <- cenischools.all  %>% distinct(X, dup, .keep_all=TRUE) %>%  arrange(desc(X))
+
+
+cenischools.all <- cenischools.all %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("(.*)( \\d )(.*)", "\\1 \\3\\2", .)))
+```
+
+Histogram (initial one including only ecole ones)
+```{r}
+cenischools.all <- cenischools.all %>%
+  dplyr::mutate(ep = ifelse(str_detect(ceni_nom_sv, "ECOLE PRIMAIRE"), 1, 0)) %>%  # ECOLE PRIMAIRE
+  dplyr::mutate(em = ifelse(str_detect(ceni_nom_sv, "ECOLE MATERNELLE"), 1, 0)) %>% # ECOLE MATERNELLLE
+  dplyr::mutate(cs = ifelse(str_detect(ceni_nom_sv, "COMPLEXE SCOLAIRE"), 1, 0)) %>% # COMPLEXE SCOLAIRE
+  dplyr::mutate(gs = ifelse(str_detect(ceni_nom_sv, "GROUPE SCOLAIRE"), 1, 0)) %>% # GROUPE SCOLAIRE
+  dplyr::mutate(col = ifelse(str_detect(ceni_nom_sv, "COLLEGE"), 1, 0)) %>% # COLLEGE
+  dplyr::mutate(lyc = ifelse(str_detect(ceni_nom_sv, "LYCEE"), 1, 0)) %>% # LYCEE
+  dplyr::mutate(inst = ifelse(str_detect(ceni_nom_sv, "INSTITUT|INSTITUT TECHNIQUE PROFESSIONNEL|INSTITUT TECHNIQUE COMMERCIAL INDUSTRIEL|INSTITUT TECHNIQUE COMMERCIAL|INSTITUT TECHNIQUE|INSTITUT TECHNIQUE COMMERCIAL INDUSTRIEL|SCIENTIFIQUE SOCIAL|INSTITUT TECHNIQUE COMMERICAL ADMINISTRATION DE TELY|INSTITUT TECHNIQUE METEO AVIATION|INSTITUT TECHNIQUE METEO|INSTITUT TECHNIQUE AGRICOLE VETERINAIRE|INSTITUT TECHNIQUE AGRICOLE|INSTITUT TECHNIQUE VETERINAIRE|INSTITUT AGRO FORESTERIE|INSTITUT TECHNIQUE AGRICOLE PROFESSIONNEL|INSTITUT TECHNIQUE MEDICAL CHRETIEN|INSTITUT SUPERIEUR TECHNOLOGIQUE DE KINSHASA"), 1, 0)) %>% # INST
+ mutate(tot_ecole = select(., ep:inst) %>% rowSums(na.rm = TRUE)) %>%  dplyr::mutate(others = ifelse(tot_ecole !=1, 1, 0))
+
+dup_ecole <- cenischools.all %>%
+  dplyr::filter(tot_ecole != 1) 
+
+df <- cenischools.all %>% dplyr::summarise(across(c(ep, em, cs, gs, col, lyc, inst, others), sum)) %>% pivot_longer(cols=everything(), names_to='school_type', values_to='count') %>% arrange(count) #collapse sum and reshape long
+p <- barplot(height=df$count, names.arg=c("Maternelle","Just Ecole","Groupe","Lycee","College", "Complexe", "Institut", "Primaire"), las=2, col="cornflowerblue", ylim=c(0,13000), main="CENI Schools (Duplicates Included)")
+text(x = p, y = df$count, label = df$count, pos = 3 , cex = 0.8, col = "black")
+```
+
+Create duplicates for "just ecole"
+Create Primaire, Maternelle, College, Lycee, Institut, Academie, Groupe, Complexe for each
+```{r}
+cenischools.all.expanded <- cenischools.all[rep(row.names(cenischools.all), ifelse(cenischools.all$others==1, 8, 1)), ] %>% filter(others == 1)  %>%  group_by(X)  %>% dplyr::mutate(ind = row_number()) %>%  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub(" ACADEMIE ", " ", .)))
+
+cenischools.all.expanded$ceni_nom_sv <- paste(cenischools.all.expanded$ind, cenischools.all.expanded$ceni_nom_sv)
+
+cenischools.all.expanded <- cenischools.all.expanded %>%
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("1 ECOLE ", "ECOLE PRIMAIRE ", .))) %>%  
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("2 ECOLE", " ECOLE MATERNELLE ", .))) %>% 
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("3 ECOLE", " COLLEGE ", .))) %>%  
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("4 ECOLE", " LYCEE ", .))) %>%  
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("5 ECOLE", " INSTITUT ", .))) %>%  
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("6 ECOLE"," ACADEMIE ", .))) %>%  
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("7 ECOLE", " GROUPE SCOLAIRE ", .))) %>%  
+  dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("8 ECOLE", " COMPLEXE SCOLAIRE ", .))) %>%
+        dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("\\s\\s", " ", .))) %>% # DOUBLE SPACE
+         dplyr::mutate_at(.vars=vars(ceni_nom_sv), list(~ gsub("^\\s|\\s$", "", .))) %>%   # SINGLE SPACE BEGINNING OR END
+ dplyr::mutate(merge_exp=1)
+
+cenischools.all.final <- dplyr::bind_rows(cenischools.all, cenischools.all.expanded) %>% arrange(desc(X))  %>%
+                       dplyr::mutate_at(c('merge_exp'), ~replace_na(.,0))
+cenischools.all.final <- cenischools.all.final[!(cenischools.all.final$others == 1 & cenischools.all.final$merge_exp == 0),]
+```
+
+Final Histogram with additional school names and export the graph
+```{r}
+cenischools.all.final <- cenischools.all.final %>% 
+  dplyr::mutate(ep = ifelse(str_detect(ceni_nom_sv, "ECOLE PRIMAIRE"), 1, 0)) %>%  # ECOLE PRIMAIRE
+  dplyr::mutate(em = ifelse(str_detect(ceni_nom_sv, "ECOLE MATERNELLE"), 1, 0)) %>% # ECOLE MATERNELLLE
+  dplyr::mutate(cs = ifelse(str_detect(ceni_nom_sv, "COMPLEXE SCOLAIRE"), 1, 0)) %>% # COMPLEXE SCOLAIRE
+  dplyr::mutate(gs = ifelse(str_detect(ceni_nom_sv, "GROUPE SCOLAIRE"), 1, 0)) %>% # GROUPE SCOLAIRE
+  dplyr::mutate(col = ifelse(str_detect(ceni_nom_sv, "COLLEGE"), 1, 0)) %>% # COLLEGE
+  dplyr::mutate(lyc = ifelse(str_detect(ceni_nom_sv, "LYCEE"), 1, 0)) %>% # LYCEE
+  dplyr::mutate(inst = ifelse(str_detect(ceni_nom_sv, "INSTITUT|INSTITUT TECHNIQUE PROFESSIONNEL|INSTITUT TECHNIQUE COMMERCIAL INDUSTRIEL|INSTITUT TECHNIQUE COMMERCIAL|INSTITUT TECHNIQUE|INSTITUT TECHNIQUE COMMERCIAL INDUSTRIEL|SCIENTIFIQUE SOCIAL|INSTITUT TECHNIQUE COMMERICAL ADMINISTRATION DE TELY|INSTITUT TECHNIQUE METEO AVIATION|INSTITUT TECHNIQUE METEO|INSTITUT TECHNIQUE AGRICOLE VETERINAIRE|INSTITUT TECHNIQUE AGRICOLE|INSTITUT TECHNIQUE VETERINAIRE|INSTITUT AGRO FORESTERIE|INSTITUT TECHNIQUE AGRICOLE PROFESSIONNEL|INSTITUT TECHNIQUE MEDICAL CHRETIEN|INSTITUT SUPERIEUR TECHNOLOGIQUE DE KINSHASA"), 1, 0)) %>% # INST
+  dplyr::mutate(ac = ifelse(str_detect(ceni_nom_sv, "ACADEMIE"), 1, 0)) %>% 
+                        relocate(ac, .after=inst)  %>%
+                      mutate(tot_ecoles = select(., ep:ac) %>% rowSums(na.rm = TRUE))
+
+ 
+dup_ecole_final <- cenischools.all.final %>%
+  dplyr::filter(tot_ecoles != 1)
+
+df.expanded <- cenischools.all.final %>% dplyr::summarise(across(c(ep, em, cs, gs, col, lyc, inst, ac), sum)) %>% pivot_longer(cols=everything(), names_to='school_type', values_to='count') %>% arrange(count) #collapse sum and reshape long
+
+
+pdf(file="CENI Schools.pdf",
+    width=5,
+    height = 5)
+
+p <- barplot(height=df.expanded$count, names.arg=c("Academie","Maternelle","Groupe","Lycee","College", "Complexe", "Institut", "Primaire"), las=2, col="cornflowerblue", ylim=c(0,13000), main="CENI Schools (Duplicates Included)")
+text(x = p, y = df$count, label = df.expanded$count, pos = 3 , cex = 0.8, col = "black")
+
+dev.off()
+  
+```
+
+Remove unnecessary columns and save the data
+```{r}
+library(writexl)
+#cenischools.all.final <- cenischools.all.final[,-55:-73]
+write_xlsx(cenischools.all.final, paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "raw")),'cenischools_clean_v3.xlsx', sep="/"))
+#write_xlsx(cenischools.all.final,"cenischools_clean_v3.xlsx")
+```
+

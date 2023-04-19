@@ -1,0 +1,376 @@
+---
+title: "Georeference for Kinshasa"
+author: "Bihter Erbas"
+date: "13/04/2023"
+output: pdf_document
+---
+
+In this document, I am outlining the steps for the georeference process for Kinshasa.
+
+### 1. Load packages and variables
+
+I am uploading the voting stations (CENI) and schools data (SIGE) which I have cleaned.
+```{r, include = FALSE}
+rm(list=ls())
+library(sf)
+library(rgeos)
+library(dplyr)
+library(tidyverse)
+library(stringr)
+library(readxl)
+library(tmap)
+library(rstudioapi)
+library(here) # Package to access parent directory while reading files (to rerun the code smoothly anywhere)
+
+# Set the path current open file
+current_path = rstudioapi::getActiveDocumentContext()$path 
+setwd(dirname(current_path ))
+
+
+cenischools.all.final <- read_excel(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "raw")),'cenischools_clean_v3.xlsx', sep="/"))
+sigeschools.all <- read_excel(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "raw")),'sigeschools.xlsx', sep="/"))
+
+```
+
+### 2. Generate Matching Variable CENI
+
+I filter the CENI data just to keep data points for Kinshasa, and create a matching variable which is the `r names(cenischools.all.final[6])`
+```{r}
+ceni_kinshasa <- cenischools.all.final %>%
+  dplyr::mutate(ceni_nom_sv = toupper(ceni_nom_sv)) %>%
+  dplyr::filter(province == "KINSHASA")
+
+
+ceni_kinshasa_match <- ceni_kinshasa %>%
+  dplyr::select(c("ceni_site_vote_ID","ceni_nom_sv","province","ceni_sect_chef_comm")) %>%
+  dplyr::mutate(match_var = paste(ceni_nom_sv)) %>%
+  dplyr::mutate(match_var = str_replace_all(match_var, fixed(" "), "")) 
+```
+
+### 3. Load Kinshasa shapefile
+
+
+```{r}
+kinshasa_sf <- read_sf(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "maps/osm_rdc_communes_221005")),'OSM_RDC_communes_221005.shp', sep="/")) %>%
+  dplyr::filter(is_in_admi == "Kinshasa") %>%
+  dplyr::mutate(name = toupper(name)) %>%
+  dplyr::mutate(name = ifelse(name == "N'DJILI", "NDJILI", name)) %>%
+  dplyr::mutate(name = ifelse(name == "MONT NGAFULA", "MONT-NGAFULA", name)) 
+kinshasa_sf <-  kinshasa_sf %>% dplyr::mutate(area = as.numeric(st_area(kinshasa_sf))) %>% 
+  dplyr::mutate(area_tot=sum(area)) %>%
+  dplyr::mutate(share=area/area_tot*100) %>%
+  dplyr::mutate(area_mean=mean(area)) %>%
+  dplyr::mutate(area_sd=sd(area)) %>%
+  dplyr::mutate(buffer1=abs(1-abs((area-area_mean)/(area_sd)))*3000) %>%
+  dplyr::mutate(buffer2=area*10^(-6)+2000)
+
+```
+
+After loading the Kinshasa shapefile, I create buffers first using the standardized measure of the communes' areas (`r names(kinshasa_sf[14])`) and then taking a portion of the areas by multiplying each by $10^{-6}$ and adding 2km buffer (`r names(kinshasa_sf[15])`). Throughout the analysis, I am using (`r names(kinshasa_sf[15])`), which has the maximum value `r as.integer(max(kinshasa_sf$buffer2))` for the commune `r kinshasa_sf$name[which.max(kinshasa_sf$buffer2)]` , and minimum value `r as.integer(min(kinshasa_sf$buffer2))` for the commune `r kinshasa_sf$name[which.min(kinshasa_sf$buffer2)]`.
+
+
+### 4. SIGE Dataset and Shapefile
+
+Next, I edit the SIGE dataset and convert it into a shapefile.
+                                    
+```{r}
+# Remove blanks in the school name
+sigeschools.all$NomEcole <- str_replace_all(sigeschools.all$NomEcole, fixed(" "), "")
+# Edit Sproved names (add hypens where necessary) and remove blanks
+sigeschools.all <- sigeschools.all %>%
+    dplyr::mutate(Sproved = ifelse(Sproved == "NGIRI NGIRI", "NGIRI-NGIRI", Sproved)) %>%
+    dplyr::mutate(Sproved = ifelse(Sproved == "MONT NGAFULA", "MONT-NGAFULA", Sproved)) %>%
+    dplyr::mutate(Sproved = ifelse(Sproved == "KASA VUBU", "KASA-VUBU", Sproved)) %>%
+    dplyr::mutate_at(.vars=vars(Sproved), list(~ gsub("[[:punct:]]", "", .)))
+    
+# Create a sf data using the edited sige data
+sigeschools.all_sf = st_as_sf(sigeschools.all, coords = c("GPS_longitude", "GPS_latitude"), 
+                                    crs = 4326)
+
+
+```
+
+### 5. Looping and Creating Additional Schools within Each Unit
+
+In this section, I extract the commune names from the ceni_kinshasa dataset and run a loop over each commune to get the final data before I perform the matching:
+
+```{r}
+commune <- unique(ceni_kinshasa$ceni_sect_chef_comm)
+
+for(c in commune){
+  
+  temp_kinshasa_sf <- kinshasa_sf %>%
+    dplyr::filter(name == c)
+  
+  temp_ceni_kishasa_match <- ceni_kinshasa_match %>% 
+    dplyr::filter(ceni_sect_chef_comm == c)
+
+  temp_kinshasa_sf_buffer_2km <- st_buffer(temp_kinshasa_sf,temp_kinshasa_sf$buffer2)
+
+  
+  # Identify schools falling within commune's buffer
+  sigeschools.all_sf_admin <- st_join(sigeschools.all_sf,temp_kinshasa_sf_buffer_2km) %>%
+    dplyr::filter(!is.na(name)) %>%
+    dplyr::distinct(NomEcole, geometry, .keep_all = TRUE) %>%
+    dplyr::distinct(NomEcole, name, .keep_all = TRUE)  #remove duplicates within same ville
+  
+  # Generate Matching Variable SIGE
+  temp_sige_match <- sigeschools.all_sf_admin %>%
+    dplyr::mutate(match_var = paste(NomEcole)) %>%
+    dplyr::mutate(match_var = str_replace_all(match_var, fixed(" "), "")) %>%
+    dplyr::select(c("match_var","latitude","longitude", "name")) %>%
+    #dplyr::filter(name == c) %>% ##?
+    dplyr::mutate(info = NA)
+  
+  temp_sige_match <- temp_sige_match %>% 
+    dplyr::mutate(match_var_trimmed = match_var) %>%
+    dplyr::mutate_at(.vars=vars(match_var_trimmed), 
+                     list(~ gsub("COMPLEXESCOLAIRE|ECOLEMATERNELLE|COLLEGE|ECOLEPRIMAIRE|LYCEE|INSTITUT|INSTITUTSCIENTIFIQUE|INSTITUTTECHNIQUEAGRICOLE|INSTITUTTECHNIQUEPROFESSIONNEL|INSTITUTTECHNOLOGIQUE|GROUPESCOLAIRE|ACADEMIE", "", .))) %>%  # remove school types
+    group_by(match_var_trimmed) %>% add_count(name = "occurence") %>% 
+    dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("ALEXIA2", "ALEXIA", .)))
+
+  
+# Take all the 1 occurences and add other school types in here
+  temp_sige_match.expanded <- temp_sige_match[rep(row.names(temp_sige_match), 
+                              ifelse(temp_sige_match$occurence==1, 8, 1)), ] %>%
+                              group_by(match_var_trimmed) %>% 
+                              #add_count(name = "ind") %>%
+                              dplyr::mutate(ind = row_number()) %>% 
+                              filter(occurence == 1)
+
+  temp_sige_match.expanded$match_var_trimmed <- paste(temp_sige_match.expanded$ind, temp_sige_match.expanded$match_var_trimmed)
+  
+ temp_sige_match.expanded<- temp_sige_match.expanded %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(1)\\s+(*.)",
+                                                              "ECOLEPRIMAIRE\\2", .))) %>%  
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(2)\\s+(*.)",
+                                                              " ECOLEMATERNELLE\\2", .))) %>% 
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(3)\\s+(*.)", 
+                                                              " COLLEGE\\2", .))) %>%  
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(4)\\s+(*.)",
+                                                              " LYCEE\\2", .))) %>%  
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(5)\\s+(*.)",
+                                                              " INSTITUT\\2", .))) %>%  
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(6)\\s+(*.)",
+                                                              " GROUPESCOLAIRE\\2", .))) %>%  
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(7)\\s+(*.)",
+                                                              " COMPLEXESCOLAIRE\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("(8)\\s+(*.)",
+                                                              " ACADEMIE\\2", .))) %>%
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("\\s\\s", " ", .))) %>% # DOUBLE SPACE
+  dplyr::mutate_at(.vars=vars(match_var_trimmed), list(~ gsub("^\\s|\\s$", "", .))) %>%   # SINGLE SPACE BEGINNING OR END
+ dplyr::mutate(merge_exp=1)
+  
+# Append the extended dataframe
+ temp_sige_match.final <- dplyr::bind_rows(temp_sige_match,  temp_sige_match.expanded)  %>%
+                       dplyr::mutate_at(c('merge_exp'), ~replace_na(.,0))
+ 
+ temp_sige_match.final <- temp_sige_match.final %>% 
+   dplyr::mutate(match_var = ifelse(occurence == 1, match_var_trimmed, match_var))
+ 
+# Match ceni and kinshasa for the particular commune
+matching <- left_join(temp_ceni_kishasa_match,temp_sige_match.final, by = "match_var") 
+
+assign(c, matching)
+}
+
+# Append all the data for each of the communes within single dataset
+var_list = ls()
+index = which(str_detect(var_list, "[[:upper:]]"))
+names_list = var_list[index]
+matching <- do.call(rbind, lapply(names_list, get, env=environment()))
+
+```
+
+Within the loop, first I filter the commune names in the Kinshasa and CENI shapefiles. Then I create a buffer around the coordinates using the `r names(kinshasa_sf[15])` that I created above. I join the sigeschools and buffer shapefiles, I identify the schools falling within each commune's buffer. Afterwards, I count the school names without the school type and for single observations, I create additional school types and store them in the temp_sige_match.expanded dataframe. In the part of the code where I am preparing additional school types %\\2 stands for the school name (e.g. SAINT JOSEPH).   I append the extended dataset with the initial one without duplicates in the temp_sige_match.final dataset. Finally, for each of the communes I perform matching with ceni and sige match dataframes.
+
+### 6. Statistics - Voting Stations
+
+Below are some statistics for the voting stations. Number of voting stations which are schools is the highest in KIMBANSEKE and lowest for GOMBE. (for the case when the duplicates have been created where there is only one school with a specific name). Please note that here I don't give statistics particularly for the matched school names.
+
+
+
+```{r echo=FALSE, out.width="50%"}
+# Number of voting stations by commune in CENI raw data
+ceni_voting_raw <- cenischools.all.final %>%
+  dplyr::mutate(ceni_nom_sv = toupper(ceni_nom_sv)) %>%
+  dplyr::filter(province == "KINSHASA") %>%
+  group_by(ceni_sect_chef_comm) %>% 
+  add_count(name = "voting_stations") %>%
+  dplyr::distinct(ceni_sect_chef_comm, .keep_all = TRUE) %>%
+  dplyr::select(c("ceni_sect_chef_comm", "voting_stations")) %>%
+  dplyr::arrange(as.numeric(voting_stations))
+  
+plot0 <- barplot(height=ceni_voting_raw$voting_stations, names.arg=ceni_voting_raw$ceni_sect_chef_comm,las=2, cex.names=0.6,col="cornflowerblue",ylim=c(0,220), main="Number of Voting Stations by Communes of Kinshasa in the CENI Raw Data", cex=0.5)
+text(x = plot0, y = ceni_voting_raw$voting_stations, label = ceni_voting_raw$voting_stations, pos = 3 , cex = 0.6, col = "black")
+
+# Number of voting stations by commune
+names_list_df <- as.data.frame(names_list)
+names_list_df <- unique(names_list_df$names_list)
+voting_stations <- data.frame(matrix(NA, nrow = length(names_list_df), ncol=2))
+for (rowIdx in 1:nrow(voting_stations)){
+  for(colIdx in 1:ncol(voting_stations)){
+  voting_stations[rowIdx, colIdx] <- names_list_df[rowIdx]
+  }
+}
+for (n in names_list){
+  voting_stations$X2 <-  ifelse(voting_stations$X2 == n, do.call(nrow, lapply(n, get, env=environment())), voting_stations$X2)
+}
+
+voting_stations <- voting_stations %>% dplyr::rename(commune=X1, voting_stations_num=X2) %>%
+  dplyr::arrange(as.numeric(voting_stations_num))
+voting_stations$voting_stations_num <- as.numeric(voting_stations$voting_stations_num)
+
+plot1 <- barplot(height=voting_stations$voting_stations_num, names.arg=voting_stations$commune,las=2, cex.names=0.6,col="cornflowerblue",ylim=c(0,220), main="Number of Voting Stations by Commune (with dups)")
+text(x = plot1, y = voting_stations$voting_stations_num, label = voting_stations$voting_stations_num, pos = 3 , cex = 0.6, col = "black")
+
+# Distribution of schools which are voting stations in Kinshasa
+matching_dist <- matching %>%
+  dplyr::mutate(ep = ifelse(str_detect(ceni_nom_sv, 
+                                       "ECOLE PRIMAIRE"), 1, 0)) %>%  # ECOLE PRIMAIRE
+  dplyr::mutate(em = ifelse(str_detect(ceni_nom_sv,
+                                       "ECOLE MATERNELLE"), 1, 0)) %>% # ECOLE MATERNELLLE
+  dplyr::mutate(cs = ifelse(str_detect(ceni_nom_sv, 
+                                       "COMPLEXE SCOLAIRE"), 1, 0)) %>% # COMPLEXE SCOLAIRE
+  dplyr::mutate(gs = ifelse(str_detect(ceni_nom_sv, 
+                                       "GROUPE SCOLAIRE"), 1, 0)) %>% # GROUPE SCOLAIRE
+  dplyr::mutate(col = ifelse(str_detect(ceni_nom_sv, 
+                                        "COLLEGE"), 1, 0)) %>% # COLLEGE
+  dplyr::mutate(lyc = ifelse(str_detect(ceni_nom_sv, 
+                                        "LYCEE"), 1, 0)) %>% # LYCEE
+  dplyr::mutate(inst = ifelse(str_detect(ceni_nom_sv, 
+                                         "INSTITUT|INSTITUT TECHNIQUE PROFESSIONNEL|
+                                         INSTITUT TECHNIQUE COMMERCIAL INDUSTRIEL|
+                                         INSTITUT TECHNIQUE COMMERCIAL|
+                                         INSTITUT TECHNIQUE|
+                                         INSTITUT TECHNIQUE COMMERCIAL INDUSTRIEL|
+                                         SCIENTIFIQUE SOCIAL|
+                                         INSTITUT TECHNIQUE COMMERICAL ADMINISTRATION DE TELY|
+                                         INSTITUT TECHNIQUE METEO AVIATION|
+                                         INSTITUT TECHNIQUE METEO|
+                                         INSTITUT TECHNIQUE AGRICOLE VETERINAIRE|
+                                         INSTITUT TECHNIQUE AGRICOLE|
+                                         INSTITUT TECHNIQUE VETERINAIRE|
+                                         INSTITUT AGRO FORESTERIE|
+                                         INSTITUT TECHNIQUE AGRICOLE PROFESSIONNEL|
+                                         INSTITUT TECHNIQUE MEDICAL CHRETIEN|
+                                         INSTITUT SUPERIEUR TECHNOLOGIQUE DE KINSHASA"), 1, 0)) %>% # INST
+   dplyr::mutate(ac = ifelse(str_detect(ceni_nom_sv, "ACADEMIE"), 1, 0)) %>% # ACADEMIE
+ mutate(tot_ecole = select(., ep:ac) %>% rowSums(na.rm = TRUE)) %>%  dplyr::mutate(others = ifelse(tot_ecole !=1, 1, 0))
+
+
+
+df <- matching_dist %>% dplyr::summarise(across(c(ep, em, cs, gs, col, lyc, inst, ac), sum)) %>% pivot_longer(cols=everything(), names_to='school_type', values_to='count') %>% arrange(count) #collapse sum and reshape long
+df$school_type[df$school_type == "ep"] <- "Ecole Primaire"
+df$school_type[df$school_type == "em"] <- "Ecole Maternelle"
+df$school_type[df$school_type == "cs"] <- "Comp. Scolaire"
+df$school_type[df$school_type == "gs"] <- "Groupe Scolaire"
+df$school_type[df$school_type == "col"] <- "College"
+df$school_type[df$school_type == "lyc"] <- "Lycee"
+df$school_type[df$school_type == "inst"] <- "Institute"
+df$school_type[df$school_type == "ac"] <- "Academie"
+
+p <- barplot(height=df$count, names.arg=df$school_type, las=2, cex.names=0.6, col="cornflowerblue", ylim=c(0,370), main="Voting Stations/Schools in Kinshasa by School Type (with dups)")
+text(x = p, y = df$count, label = df$count, pos = 3 , cex = 0.8, col = "black")
+
+  
+```
+
+
+### 7. Matching
+
+Below, I filter out the observations for which there is no georeference. The dataframe georeference_kinshasa gives the observations for which we are able to successfully perform matching.
+
+```{r}
+
+georeference_kinshasa <- matching %>%
+  #dplyr::select(c(ceni_site_vote_ID,latitude, longitude)) %>%
+  dplyr::filter(!is.na(latitude)) %>%
+  dplyr::mutate(source = "kinshasa")
+
+matching_filtered <- matching %>% dplyr::filter(is.na(latitude)) 
+matching_filtered_wo_dup <- matching_filtered %>% dplyr::filter(!str_detect(match_var, 
+                                                                            "ACADEMIE")) %>%
+  distinct(ceni_site_vote_ID, ceni_sect_chef_comm, latitude, .keep_all=TRUE)
+
+x <- nrow(georeference_kinshasa)
+y <- nrow(matching)
+z <- nrow(matching_filtered) - nrow(matching_filtered_wo_dup)
+
+matching_performance <- x/(y-z)*100
+
+```
+
+While calculating the matching performance for Kinshasa, I remove the duplicate schools which I created earlier while cleaning the data. Based on the calculations, the matching performance is `r matching_performance`$\%$. In total, there are `r y-z` voting stations which are schools and we are able to georeference `r x` of them. 
+
+```{r eval=FALSE, include=FALSE}
+library(writexl)
+write_xlsx(georeference_kinshasa, paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "output")),'georeference_kinshasa.xlsx', sep="/"))
+#write_xlsx(georeference_kinshasa,"georeference_kinshasa.xlsx")
+```
+
+
+### 8.Statistics - Matching
+
+The first graph below shows the distribution of matched school names by commune while the second graph gives the same distribution by percentages. For instance, looking at Graph 2, we see that almost 15$\%$ of the matched schools are in KIMBANSEKE. The third graph gives the matching performance for each commune. In NGABA, there are 27 schools (see Graph 1) and 25 of them were matched and the performance is 92.5$\%$ (see Graph 3).
+
+
+```{r echo = FALSE, out.width="50%"}
+# Number of matches by commune
+commune_dist <- georeference_kinshasa %>% 
+  group_by(ceni_sect_chef_comm) %>% 
+  add_count(name = "number" ) %>%
+  mutate(percent = number/nrow(georeference_kinshasa)*100) %>%
+  distinct(ceni_sect_chef_comm, .keep_all=TRUE) %>%
+  arrange(number)
+
+p <- barplot(height=commune_dist$number, names.arg=commune_dist$ceni_sect_chef_comm, las=2, cex.names=0.6, col="cornflowerblue", ylim=c(0,110), main="Georeference by Commune (Count)")
+text(x = p, y = commune_dist$number, label = commune_dist$number, pos = 3 , cex = 0.8, col = "black")
+
+p <- barplot(height=commune_dist$percent, names.arg=commune_dist$ceni_sect_chef_comm, las=2, cex.names=0.6, col="cornflowerblue", ylim=c(0,20), main="Georeference by Commune (Percentage)")
+
+# Matching Performance by Commune
+
+commune_tot <- matching %>%
+  group_by(ceni_sect_chef_comm) %>%
+  add_count(name = "tot") %>%
+  distinct(ceni_sect_chef_comm, .keep_all=TRUE) %>%
+  dplyr::select(c('ceni_sect_chef_comm','tot'))
+
+commune_matching <- georeference_kinshasa %>%
+  group_by(ceni_sect_chef_comm) %>%
+  add_count(name = 'number') %>%
+  distinct(ceni_sect_chef_comm, .keep_all=TRUE) %>%
+  dplyr::select(c('ceni_sect_chef_comm', 'number'))
+
+commune_performance <- left_join(commune_matching, commune_tot, by="ceni_sect_chef_comm")
+commune_performance <- commune_performance %>% dplyr::mutate(share = number/tot*100) %>%
+  arrange(share)
+
+p <- barplot(height=commune_performance$share, names.arg=commune_performance$ceni_sect_chef_comm, las=2, cex.names=0.6, col="cornflowerblue", ylim=c(0,100), main="Matching Performance by Commune (Percent)")
+
+```
+
+\textit{We're losing observations for GOMBE because of the buffer. If we make the buffer, let's say 5km, we are able to match some of the schools.}
+
+### 9. Mapping
+
+```{r echo=FALSE}
+congo_shp <- read_sf(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "maps/congo")),'COD_adm0.shp', sep="/"))
+georeference_shp <- st_as_sf(georeference_kinshasa, coords = c("longitude", "latitude"), 
+                                    crs = 4326)
+map <- tm_shape(kinshasa_sf) + tm_fill(col = "grey85") +
+ tm_borders(col="white", lwd = 1) +
+tm_shape(georeference_shp) + tm_dots(col="red", shape = 18, size =.05, title = "Voting Stations in Kinshasa") +
+  tm_credits("Matched Voting Stations in Kinshasa",
+             position = c("LEFT", "BOTTOM")) +
+  tm_compass() + 
+  tm_scale_bar() +
+  tm_layout(frame = FALSE, 
+            legend.outside = FALSE,
+            legend.show = TRUE) 
+map
+
+```
+
+  
