@@ -60,10 +60,10 @@ Next, I edit the SIGE dataset by removing any spaces from the school name etc. a
 ```{r}
 sigeschools.all$NomEcole <- str_replace_all(sigeschools.all$NomEcole, fixed(" "), "")
 
-# Extract villes in the SIGE data
 sigeschools.all <- sigeschools.all %>%
   dplyr::mutate(NomEcole = toupper(NomEcole)) 
 
+# Create a shape file using the coordinates
 sigeschools.all_sf = st_as_sf(sigeschools.all, coords = c("GPS_longitude", "GPS_latitude"), 
                                     crs = 4326)
 

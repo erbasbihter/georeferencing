@@ -29,7 +29,7 @@ current_path = rstudioapi::getActiveDocumentContext()$path
 setwd(dirname(current_path ))
 
 
-sigeschools.all <- read_excel(paste((file.path(here::here() %>% dirname(), "raw")),'sigeschools.xlsx', sep="/"))
+sigeschools.all <- read_excel(paste((file.path(here::here(current_path) %>% dirname() %>% dirname(), "raw")),'sigeschools.xlsx', sep="/"))
 
 ``` 
 
@@ -160,7 +160,7 @@ for(s in small_villes) {
   sigeschools.all_sf_admin <- st_join(sigeschools.all_sf,  temp_villes_sf_buffer_10km, left = FALSE) %>%
     #dplyr::filter(!is.na(town_province.x)) %>%
     #dplyr::distinct(NomEcole, geometry, .keep_all = TRUE) %>%
-    dplyr::distinct(NomEcole, town_province.y, .keep_all = TRUE) # HERE I REMOVE DUPLICATE WITHIN SAME VILLE
+    dplyr::distinct(NomEcole, .keep_all = TRUE) # HERE I REMOVE DUPLICATE WITHIN SAME VILLE
   
     # Generate Matching Variable SIGE
   temp_sige_match <- sigeschools.all_sf_admin %>%

@@ -61,12 +61,11 @@ kinshasa_sf <-  kinshasa_sf %>% dplyr::mutate(area = as.numeric(st_area(kinshasa
   dplyr::mutate(share=area/area_tot*100) %>%
   dplyr::mutate(area_mean=mean(area)) %>%
   dplyr::mutate(area_sd=sd(area)) %>%
-  dplyr::mutate(buffer1=abs(1-abs((area-area_mean)/(area_sd)))*3000) %>%
-  dplyr::mutate(buffer2=area*10^(-6)+2000)
+  dplyr::mutate(buffer=area*10^(-6)+2000)
 
 ```
 
-After loading the Kinshasa shapefile, I create buffers first using the standardized measure of the communes' areas (`r names(kinshasa_sf[14])`) and then taking a portion of the areas by multiplying each by $10^{-6}$ and adding 2km buffer (`r names(kinshasa_sf[15])`). Throughout the analysis, I am using (`r names(kinshasa_sf[15])`), which has the maximum value `r as.integer(max(kinshasa_sf$buffer2))` for the commune `r kinshasa_sf$name[which.max(kinshasa_sf$buffer2)]` , and minimum value `r as.integer(min(kinshasa_sf$buffer2))` for the commune `r kinshasa_sf$name[which.min(kinshasa_sf$buffer2)]`.
+After loading the Kinshasa shapefile, I create buffers first using the standardized measure of the communes' areas (`r names(kinshasa_sf[13])`) and then taking a portion of the areas by multiplying each by $10^{-6}$ and adding 2km buffer (`r names(kinshasa_sf[14])`). Throughout the analysis, I am using (`r names(kinshasa_sf[14])`), which has the maximum value `r as.integer(max(kinshasa_sf$buffer))` for the commune `r kinshasa_sf$name[which.max(kinshasa_sf$buffer)]` , and minimum value `r as.integer(min(kinshasa_sf$buffer))` for the commune `r kinshasa_sf$name[which.min(kinshasa_sf$buffer)]`.
 
 
 ### 4. SIGE Dataset and Shapefile
@@ -105,13 +104,13 @@ for(c in commune){
   temp_ceni_kishasa_match <- ceni_kinshasa_match %>% 
     dplyr::filter(ceni_sect_chef_comm == c)
 
-  temp_kinshasa_sf_buffer_2km <- st_buffer(temp_kinshasa_sf,temp_kinshasa_sf$buffer2)
+  temp_kinshasa_sf_buffer_2km <- st_buffer(temp_kinshasa_sf,temp_kinshasa_sf$buffer)
 
   
   # Identify schools falling within commune's buffer
   sigeschools.all_sf_admin <- st_join(sigeschools.all_sf,temp_kinshasa_sf_buffer_2km) %>%
     dplyr::filter(!is.na(name)) %>%
-    dplyr::distinct(NomEcole, geometry, .keep_all = TRUE) %>%
+    #dplyr::distinct(NomEcole, geometry, .keep_all = TRUE) %>%
     dplyr::distinct(NomEcole, name, .keep_all = TRUE)  #remove duplicates within same ville
   
   # Generate Matching Variable SIGE
