@@ -17,6 +17,9 @@ Step 2: Start georeferencing by running Georeference_Kinshasa in the 'analysis' 
 Step 3: Move on with georeferencing by running Georeference_Others and Georeference_villes in 'analysis' folder. The final outputs are stored in the
 'output' folder.
 
-Step 4: Finally, run the Georeference_Village_School code in the 'analysis' folder. In the very last section, buffers for each admin variables are created
-and those finals are also stored in the 'output' folder. The very final result is either 'matching_buffers4_40km' or 'matching_buffers5_80km' depending on 
-which admin variable we want to use last.
+Step 4: Run the Georeference_Village_School code in the 'analysis' folder. This code does the matching for schools whose name is the village name. 
+I'm removing the schools which are very close to each other here.
+
+
+Step 5: Finally in Georeference_Buffer code, buffers for each admin variables are created and those finals are also stored in the 'output' folder. The very final result is  'matching_buffers4_40km'.
+I'm also producing some tables/graphs here to compare matched and unmatched observations. The pdf version of this code can be also found in the same folder ('analysis') where the code is.
